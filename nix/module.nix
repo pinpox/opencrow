@@ -7,6 +7,7 @@
 }:
 let
   cfg = config.services.opencrow;
+  opencrowPkg = cfg.package;
 in
 {
   options.services.opencrow = {
@@ -19,11 +20,39 @@ in
     environmentFile = lib.mkOption {
       type = lib.types.path;
       description = ''
-        Path to an environment file containing secrets.
+        Path to an environment file containing secrets (on the host).
+        Bind-mounted read-only into the container.
         Must define at minimum:
         - OPENCROW_MATRIX_ACCESS_TOKEN
         - ANTHROPIC_API_KEY (or the appropriate key for your provider)
       '';
+    };
+
+    extraEnvironmentFiles = lib.mkOption {
+      type = lib.types.listOf lib.types.path;
+      default = [ ];
+      description = "Additional environment files bind-mounted into the container.";
+    };
+
+    extraPackages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      description = "Extra packages available inside the container and on the service PATH.";
+      example = lib.literalExpression "[ pkgs.curl pkgs.jq ]";
+    };
+
+    extraBindMounts = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        options = {
+          hostPath = lib.mkOption { type = lib.types.str; };
+          isReadOnly = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+          };
+        };
+      });
+      default = { };
+      description = "Additional bind mounts into the container.";
     };
 
     environment = lib.mkOption {
@@ -35,12 +64,6 @@ in
             type = lib.types.str;
             description = "Matrix homeserver URL.";
             example = "https://matrix.example.com";
-          };
-
-          OPENCROW_MATRIX_USER_ID = lib.mkOption {
-            type = lib.types.str;
-            description = "Matrix user ID for the bot.";
-            example = "@opencrow:example.com";
           };
 
           OPENCROW_MATRIX_DEVICE_ID = lib.mkOption {
@@ -57,7 +80,7 @@ in
 
           OPENCROW_PI_MODEL = lib.mkOption {
             type = lib.types.str;
-            default = "claude-sonnet-4-5-20250929";
+            default = "claude-opus-4-6";
             description = "Model ID for pi to use.";
           };
 
@@ -87,8 +110,14 @@ in
 
           OPENCROW_PI_SKILLS = lib.mkOption {
             type = lib.types.str;
-            default = "${cfg.package}/share/opencrow/skills/web";
+            default = "${opencrowPkg}/share/opencrow/skills/web";
             description = "Comma-separated list of skill paths to pass to pi via --skill.";
+          };
+
+          OPENCROW_SOUL_FILE = lib.mkOption {
+            type = lib.types.str;
+            default = "${opencrowPkg}/share/opencrow/SOUL.md";
+            description = "Path to SOUL.md personality file.";
           };
 
           PI_CODING_AGENT_DIR = lib.mkOption {
@@ -120,29 +149,76 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    systemd.services.opencrow = {
-      description = "OpenCrow Matrix Bot";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
 
-      environment = cfg.environment;
+    # State directory on host (bind-mounted into container)
+    systemd.tmpfiles.rules = [
+      "d /var/lib/opencrow 0750 root root -"
+    ];
 
-      serviceConfig = {
-        ExecStart = lib.getExe cfg.package;
-        EnvironmentFile = cfg.environmentFile;
-        StateDirectory = "opencrow";
-        WorkingDirectory = "/var/lib/opencrow";
-        Restart = "on-failure";
-        RestartSec = 10;
+    # Work around stale machined registration after unclean shutdown.
+    systemd.services."container@opencrow".preStart = lib.mkBefore ''
+      ${pkgs.systemd}/bin/busctl call org.freedesktop.machine1 \
+        /org/freedesktop/machine1 \
+        org.freedesktop.machine1.Manager \
+        UnregisterMachine s opencrow 2>/dev/null || true
+    '';
 
-        # Hardening
-        DynamicUser = true;
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-      };
+    containers.opencrow = {
+      autoStart = true;
+      privateNetwork = false;
+
+      bindMounts =
+        {
+          "/var/lib/opencrow" = {
+            hostPath = "/var/lib/opencrow";
+            isReadOnly = false;
+          };
+          "/run/secrets/opencrow-envfile" = {
+            hostPath = builtins.toString cfg.environmentFile;
+            isReadOnly = true;
+          };
+        }
+        // lib.listToAttrs (
+          map (path: {
+            name = "/run/secrets/opencrow-extra-${builtins.baseNameOf (builtins.toString path)}";
+            value = {
+              hostPath = builtins.toString path;
+              isReadOnly = true;
+            };
+          }) cfg.extraEnvironmentFiles
+        )
+        // cfg.extraBindMounts;
+
+      config =
+        { ... }:
+        {
+          system.stateVersion = "25.05";
+
+          systemd.services.opencrow = {
+            description = "OpenCrow Matrix Bot";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network-online.target" ];
+            wants = [ "network-online.target" ];
+
+            path = [ opencrowPkg ] ++ cfg.extraPackages;
+
+            environment = cfg.environment;
+
+            serviceConfig = {
+              EnvironmentFile =
+                [ "/run/secrets/opencrow-envfile" ]
+                ++ map (
+                  path: "/run/secrets/opencrow-extra-${builtins.baseNameOf (builtins.toString path)}"
+                ) cfg.extraEnvironmentFiles;
+              ExecStart = lib.getExe opencrowPkg;
+              Restart = "on-failure";
+              RestartSec = 10;
+              WorkingDirectory = "/var/lib/opencrow";
+            };
+          };
+
+          environment.systemPackages = [ opencrowPkg ] ++ cfg.extraPackages;
+        };
     };
   };
 }

@@ -71,7 +71,7 @@ func LoadConfig() (*Config, error) {
 			BinaryPath:   envOr("OPENCROW_PI_BINARY", "pi"),
 			SessionDir:   envOr("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
 			Provider:     envOr("OPENCROW_PI_PROVIDER", "anthropic"),
-			Model:        envOr("OPENCROW_PI_MODEL", "claude-sonnet-4-5-20250929"),
+			Model:        envOr("OPENCROW_PI_MODEL", "claude-opus-4-6"),
 			WorkingDir:   workingDir,
 			IdleTimeout:  idleTimeout,
 			SystemPrompt: loadSoul(),
