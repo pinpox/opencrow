@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 )
@@ -25,10 +26,13 @@ func NewPiPool(cfg PiConfig) *PiPool {
 // Get returns an existing live pi process for the room, or spawns a new one.
 func (pool *PiPool) Get(ctx context.Context, roomID string) (*PiProcess, error) {
 	pool.mu.Lock()
+
 	if p, ok := pool.processes[roomID]; ok && p.IsAlive() {
 		pool.mu.Unlock()
+
 		return p, nil
 	}
+
 	// Remove stale entry if present
 	delete(pool.processes, roomID)
 
@@ -36,11 +40,13 @@ func (pool *PiPool) Get(ctx context.Context, roomID string) (*PiProcess, error) 
 	p, err := StartPi(ctx, pool.cfg, roomID)
 	if err != nil {
 		pool.mu.Unlock()
+
 		return nil, err
 	}
 
 	pool.processes[roomID] = p
 	pool.mu.Unlock()
+
 	return p, nil
 }
 
@@ -62,22 +68,25 @@ func (pool *PiPool) Remove(roomID string) {
 func (pool *PiPool) Rooms() []string {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
+
 	rooms := make([]string, 0, len(pool.processes))
+
 	for roomID, p := range pool.processes {
 		if p.IsAlive() {
 			rooms = append(rooms, roomID)
 		}
 	}
+
 	return rooms
 }
 
 // StopAll kills all managed pi processes.
 func (pool *PiPool) StopAll() {
 	pool.mu.Lock()
+
 	procs := make(map[string]*PiProcess, len(pool.processes))
-	for k, v := range pool.processes {
-		procs[k] = v
-	}
+	maps.Copy(procs, pool.processes)
+
 	pool.processes = make(map[string]*PiProcess)
 	pool.mu.Unlock()
 
@@ -107,12 +116,15 @@ func (pool *PiPool) StartIdleReaper(ctx context.Context) {
 
 func (pool *PiPool) reapIdle() {
 	pool.mu.Lock()
+
 	var toReap []string
+
 	for roomID, p := range pool.processes {
 		if !p.IsAlive() || time.Since(p.LastUse()) > pool.cfg.IdleTimeout {
 			toReap = append(toReap, roomID)
 		}
 	}
+
 	pool.mu.Unlock()
 
 	for _, roomID := range toReap {

@@ -13,11 +13,17 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
+	os.Exit(run())
+}
+
+func run() int {
 	cfg, err := LoadConfig()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
+
+		return 1
 	}
+
 	slog.Info("config loaded")
 
 	pool := NewPiPool(cfg.Pi)
@@ -30,7 +36,8 @@ func main() {
 	bot, err := NewBot(cfg.Matrix, pool)
 	if err != nil {
 		slog.Error("failed to create bot", "error", err)
-		os.Exit(1)
+
+		return 1
 	}
 
 	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, bot.SendToRoom)
@@ -39,6 +46,7 @@ func main() {
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, shutting down", "signal", sig)
@@ -48,16 +56,20 @@ func main() {
 	}()
 
 	slog.Info("opencrow starting")
+
 	if err := bot.Run(ctx, cfg.Matrix); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("shutdown complete")
 		} else {
 			slog.Error("bot exited with error", "error", err)
-			os.Exit(1)
+
+			return 1
 		}
 	}
 
 	if err := bot.Close(); err != nil {
 		slog.Error("failed to close bot", "error", err)
 	}
+
+	return 0
 }

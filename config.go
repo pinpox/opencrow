@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,44 +43,18 @@ type PiConfig struct {
 }
 
 func LoadConfig() (*Config, error) {
-	idleTimeout := 30 * time.Minute
-	if v := os.Getenv("OPENCROW_PI_IDLE_TIMEOUT"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("parsing OPENCROW_PI_IDLE_TIMEOUT: %w", err)
-		}
-		idleTimeout = d
+	idleTimeout, err := parseIdleTimeout()
+	if err != nil {
+		return nil, err
 	}
 
-	var skills []string
-	if v := os.Getenv("OPENCROW_PI_SKILLS"); v != "" {
-		for _, s := range strings.Split(v, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				skills = append(skills, s)
-			}
-		}
-	}
-
-	allowedUsers := make(map[string]struct{})
-	if v := os.Getenv("OPENCROW_ALLOWED_USERS"); v != "" {
-		for _, u := range strings.Split(v, ",") {
-			u = strings.TrimSpace(u)
-			if u != "" {
-				allowedUsers[u] = struct{}{}
-			}
-		}
-	}
-
+	skills := parseSkills()
+	allowedUsers := parseAllowedUsers()
 	workingDir := envOr("OPENCROW_PI_WORKING_DIR", "/var/lib/opencrow")
 
-	var heartbeatInterval time.Duration
-	if v := os.Getenv("OPENCROW_HEARTBEAT_INTERVAL"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("parsing OPENCROW_HEARTBEAT_INTERVAL: %w", err)
-		}
-		heartbeatInterval = d
+	heartbeatInterval, err := parseHeartbeatInterval()
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := &Config{
@@ -110,16 +85,74 @@ func LoadConfig() (*Config, error) {
 	}
 
 	if cfg.Matrix.Homeserver == "" {
-		return nil, fmt.Errorf("OPENCROW_MATRIX_HOMESERVER is required")
+		return nil, errors.New("OPENCROW_MATRIX_HOMESERVER is required")
 	}
+
 	if cfg.Matrix.UserID == "" {
-		return nil, fmt.Errorf("OPENCROW_MATRIX_USER_ID is required")
+		return nil, errors.New("OPENCROW_MATRIX_USER_ID is required")
 	}
+
 	if cfg.Matrix.AccessToken == "" {
-		return nil, fmt.Errorf("OPENCROW_MATRIX_ACCESS_TOKEN is required")
+		return nil, errors.New("OPENCROW_MATRIX_ACCESS_TOKEN is required")
 	}
 
 	return cfg, nil
+}
+
+func parseIdleTimeout() (time.Duration, error) {
+	if v := os.Getenv("OPENCROW_PI_IDLE_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return 0, fmt.Errorf("parsing OPENCROW_PI_IDLE_TIMEOUT: %w", err)
+		}
+
+		return d, nil
+	}
+
+	return 30 * time.Minute, nil
+}
+
+func parseSkills() []string {
+	var skills []string
+
+	if v := os.Getenv("OPENCROW_PI_SKILLS"); v != "" {
+		for s := range strings.SplitSeq(v, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				skills = append(skills, s)
+			}
+		}
+	}
+
+	return skills
+}
+
+func parseAllowedUsers() map[string]struct{} {
+	allowedUsers := make(map[string]struct{})
+
+	if v := os.Getenv("OPENCROW_ALLOWED_USERS"); v != "" {
+		for u := range strings.SplitSeq(v, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				allowedUsers[u] = struct{}{}
+			}
+		}
+	}
+
+	return allowedUsers
+}
+
+func parseHeartbeatInterval() (time.Duration, error) {
+	if v := os.Getenv("OPENCROW_HEARTBEAT_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return 0, fmt.Errorf("parsing OPENCROW_HEARTBEAT_INTERVAL: %w", err)
+		}
+
+		return d, nil
+	}
+
+	return 0, nil
 }
 
 // loadSoul reads the system prompt from OPENCROW_SOUL_FILE if set,
@@ -133,9 +166,11 @@ func loadSoul() string {
 			return string(data)
 		}
 	}
+
 	if v := os.Getenv("OPENCROW_PI_SYSTEM_PROMPT"); v != "" {
 		return v
 	}
+
 	return defaultSoul
 }
 
@@ -154,5 +189,6 @@ func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
+
 	return fallback
 }

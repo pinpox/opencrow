@@ -24,7 +24,12 @@ type HeartbeatScheduler struct {
 }
 
 // NewHeartbeatScheduler creates a new heartbeat scheduler.
-func NewHeartbeatScheduler(pool *PiPool, piCfg PiConfig, hbCfg HeartbeatConfig, sendReply func(ctx context.Context, roomID string, text string)) *HeartbeatScheduler {
+func NewHeartbeatScheduler(
+	pool *PiPool,
+	piCfg PiConfig,
+	hbCfg HeartbeatConfig,
+	sendReply func(ctx context.Context, roomID string, text string),
+) *HeartbeatScheduler {
 	return &HeartbeatScheduler{
 		pool:      pool,
 		cfg:       hbCfg,
@@ -39,6 +44,7 @@ func NewHeartbeatScheduler(pool *PiPool, piCfg PiConfig, hbCfg HeartbeatConfig, 
 func (h *HeartbeatScheduler) Start(ctx context.Context) {
 	if h.cfg.Interval <= 0 {
 		slog.Info("heartbeat disabled (interval not set)")
+
 		return
 	}
 
@@ -76,6 +82,7 @@ func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 	for _, r := range rooms {
 		roomSet[r] = struct{}{}
 	}
+
 	for r := range triggers {
 		roomSet[r] = struct{}{}
 	}
@@ -112,11 +119,13 @@ func (h *HeartbeatScheduler) readTriggers() map[string]string {
 		if !os.IsNotExist(err) {
 			slog.Warn("failed to read trigger directory", "path", h.cfg.TriggerDir, "error", err)
 		}
+
 		return triggers
 	}
 
 	for _, entry := range entries {
 		name := entry.Name()
+
 		if !strings.HasSuffix(name, ".trigger") {
 			continue
 		}
@@ -124,14 +133,15 @@ func (h *HeartbeatScheduler) readTriggers() map[string]string {
 		roomID := strings.TrimSuffix(name, ".trigger")
 		path := filepath.Join(h.cfg.TriggerDir, name)
 
-		data, err := os.ReadFile(path)
-		if err != nil {
-			slog.Warn("failed to read trigger file", "path", path, "error", err)
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			slog.Warn("failed to read trigger file", "path", path, "error", readErr)
+
 			continue
 		}
 
-		if err := os.Remove(path); err != nil {
-			slog.Warn("failed to remove trigger file", "path", path, "error", err)
+		if removeErr := os.Remove(path); removeErr != nil {
+			slog.Warn("failed to remove trigger file", "path", path, "error", removeErr)
 		}
 
 		content := strings.TrimSpace(string(data))
@@ -165,41 +175,53 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string, triggerCon
 	pi, err := h.pool.Get(ctx, roomID)
 	if err != nil {
 		slog.Error("heartbeat: failed to get pi process", "room", roomID, "error", err)
+
 		return
 	}
 
-	// Build prompt
+	prompt := buildHeartbeatPrompt(h.cfg.Prompt, content, triggerContext)
+
+	reply, err := pi.PromptNoTouch(ctx, prompt)
+	if err != nil {
+		slog.Error("heartbeat: pi prompt failed", "room", roomID, "error", err)
+		h.pool.Remove(roomID)
+
+		return
+	}
+
+	if containsHeartbeatOK(reply) {
+		slog.Info("heartbeat: HEARTBEAT_OK, suppressing", "room", roomID)
+
+		return
+	}
+
+	if reply == "" {
+		slog.Info("heartbeat: empty response, suppressing", "room", roomID)
+
+		return
+	}
+
+	h.sendReply(ctx, roomID, reply)
+}
+
+func buildHeartbeatPrompt(basePrompt, content, triggerContext string) string {
 	var prompt strings.Builder
-	prompt.WriteString(h.cfg.Prompt)
+
+	prompt.WriteString(basePrompt)
+
 	if !isEffectivelyEmpty(content) {
 		prompt.WriteString("\n\n--- HEARTBEAT.md contents ---\n")
 		prompt.WriteString(content)
 		prompt.WriteString("\n--- end HEARTBEAT.md ---")
 	}
+
 	if triggerContext != "" {
 		prompt.WriteString("\n\n--- External trigger ---\n")
 		prompt.WriteString(triggerContext)
 		prompt.WriteString("\n--- end trigger ---")
 	}
 
-	reply, err := pi.PromptNoTouch(ctx, prompt.String())
-	if err != nil {
-		slog.Error("heartbeat: pi prompt failed", "room", roomID, "error", err)
-		h.pool.Remove(roomID)
-		return
-	}
-
-	if containsHeartbeatOK(reply) {
-		slog.Info("heartbeat: HEARTBEAT_OK, suppressing", "room", roomID)
-		return
-	}
-
-	if reply == "" {
-		slog.Info("heartbeat: empty response, suppressing", "room", roomID)
-		return
-	}
-
-	h.sendReply(ctx, roomID, reply)
+	return prompt.String()
 }
 
 // isEffectivelyEmpty returns true if the content contains only headers,
@@ -209,39 +231,38 @@ func isEffectivelyEmpty(content string) bool {
 		return true
 	}
 
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" {
+
+		if line == "" || isMarkdownHeader(line) || isEmptyListItem(line) {
 			continue
 		}
-		// Skip markdown headers
-		if strings.HasPrefix(line, "#") {
-			trimmed := strings.TrimLeft(line, "# ")
-			if trimmed == "" {
-				continue
-			}
-			// Header with only whitespace after
-			continue
-		}
-		// Skip empty list items
-		if line == "-" || line == "*" || line == "+" {
-			continue
-		}
-		trimmedBullet := strings.TrimPrefix(line, "- ")
-		if trimmedBullet == line {
-			trimmedBullet = strings.TrimPrefix(line, "* ")
-		}
-		if trimmedBullet == line {
-			trimmedBullet = strings.TrimPrefix(line, "+ ")
-		}
-		if trimmedBullet != line && strings.TrimSpace(trimmedBullet) == "" {
-			continue
-		}
+
 		// Found a non-empty, non-structural line
 		return false
 	}
 
 	return true
+}
+
+func isMarkdownHeader(line string) bool {
+	return strings.HasPrefix(line, "#")
+}
+
+func isEmptyListItem(line string) bool {
+	// Bare bullet markers
+	if line == "-" || line == "*" || line == "+" {
+		return true
+	}
+
+	// Bullet followed by only whitespace
+	for _, prefix := range []string{"- ", "* ", "+ "} {
+		if after, ok := strings.CutPrefix(line, prefix); ok {
+			return strings.TrimSpace(after) == ""
+		}
+	}
+
+	return false
 }
 
 // containsHeartbeatOK checks if the response is essentially just HEARTBEAT_OK.
@@ -259,9 +280,11 @@ func containsHeartbeatOK(response string) bool {
 
 	// Count non-whitespace chars remaining
 	count := 0
+
 	for _, r := range cleaned {
 		if !unicode.IsSpace(r) {
 			count++
+
 			if count >= 50 {
 				return false
 			}
