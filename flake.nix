@@ -28,6 +28,7 @@
             postInstall = ''
               mkdir -p $out/share/opencrow
               cp -r skills $out/share/opencrow/skills
+              cp SOUL.md $out/share/opencrow/SOUL.md
             '';
 
             meta = {

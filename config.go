@@ -83,7 +83,7 @@ func LoadConfig() (*Config, error) {
 			Model:        envOr("OPENCROW_PI_MODEL", "claude-sonnet-4-5-20250929"),
 			WorkingDir:   workingDir,
 			IdleTimeout:  idleTimeout,
-			SystemPrompt: envOr("OPENCROW_PI_SYSTEM_PROMPT", defaultSystemPrompt),
+			SystemPrompt: loadSoul(),
 			Skills:       skills,
 		},
 	}
@@ -101,11 +101,29 @@ func LoadConfig() (*Config, error) {
 	return cfg, nil
 }
 
-const defaultSystemPrompt = `You are OpenCrow, a helpful AI assistant accessible via Matrix chat. You have access to tools that let you execute bash commands, read and write files, and more.
+// loadSoul reads the system prompt from OPENCROW_SOUL_FILE if set,
+// falling back to OPENCROW_PI_SYSTEM_PROMPT, then the built-in default.
+func loadSoul() string {
+	if path := os.Getenv("OPENCROW_SOUL_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to read soul file %s: %v\n", path, err)
+		} else {
+			return string(data)
+		}
+	}
+	if v := os.Getenv("OPENCROW_PI_SYSTEM_PROMPT"); v != "" {
+		return v
+	}
+	return defaultSoul
+}
 
-Be concise and direct. When asked to perform tasks, use your tools proactively. For complex tasks, break them down and execute step by step.
+const defaultSoul = `You are OpenCrow, an AI assistant living in Matrix chat rooms.
 
-When using bash, prefer standard Unix tools. Check command output before proceeding to the next step.`
+Be genuinely helpful, not performatively helpful. Skip the filler words — just help.
+Have opinions. Be resourceful before asking. Earn trust through competence.
+Be concise when needed, thorough when it matters. Not a corporate drone. Not a sycophant. Just good.
+When using tools, prefer standard Unix tools. Check output before proceeding. Break complex tasks into steps and execute them.`
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
