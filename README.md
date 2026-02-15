@@ -1,10 +1,11 @@
-<p align="center">
-  <img src="logo.png" width="200" alt="OpenCrow logo">
-</p>
+
 
 # OpenCrow
 
 A saner alternative to [OpenClaw](https://github.com/openclaw/openclaw).
+<p align="center">
+  <img src="logo.png" width="200" alt="OpenCrow logo">
+</p>
 
 OpenCrow is a Matrix bot that bridges chat messages to
 [pi](https://github.com/badlogic/pi-mono), a coding agent with built-in tools,
