@@ -2,21 +2,32 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
+	"sync/atomic"
+
+	"github.com/rs/zerolog"
+	"go.mau.fi/util/dbutil"
+	_ "modernc.org/sqlite"
 
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/crypto/cryptohelper"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/format"
 	"maunium.net/go/mautrix/id"
 )
 
 const maxMessageLen = 30000
 
 type Bot struct {
-	client       *mautrix.Client
-	pool         *PiPool
-	userID       id.UserID
-	allowedUsers map[string]struct{}
+	client        *mautrix.Client
+	cryptoHelper  *cryptohelper.CryptoHelper
+	pool          *PiPool
+	userID        id.UserID
+	allowedUsers  map[string]struct{}
+	initialSynced atomic.Bool
 }
 
 func NewBot(cfg MatrixConfig, pool *PiPool) (*Bot, error) {
@@ -29,6 +40,10 @@ func NewBot(cfg MatrixConfig, pool *PiPool) (*Bot, error) {
 		client.DeviceID = id.DeviceID(cfg.DeviceID)
 	}
 
+	client.Log = zerolog.New(zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
+		w.Out = os.Stderr
+	})).With().Timestamp().Logger().Level(zerolog.InfoLevel)
+
 	return &Bot{
 		client:       client,
 		pool:         pool,
@@ -37,7 +52,55 @@ func NewBot(cfg MatrixConfig, pool *PiPool) (*Bot, error) {
 	}, nil
 }
 
-func (b *Bot) Run(ctx context.Context) error {
+func (b *Bot) setupCrypto(ctx context.Context, cfg MatrixConfig) error {
+	// Resolve device ID from server if not configured
+	if b.client.DeviceID == "" {
+		resp, err := b.client.Whoami(ctx)
+		if err != nil {
+			return fmt.Errorf("fetching device ID from server: %w", err)
+		}
+		if resp.DeviceID == "" {
+			return fmt.Errorf("server did not return a device ID; set OPENCROW_MATRIX_DEVICE_ID")
+		}
+		b.client.DeviceID = resp.DeviceID
+		slog.Info("resolved device ID from server", "device_id", resp.DeviceID)
+	}
+
+	// Open SQLite database with pure-Go driver
+	sqlDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_txlock=immediate&_pragma=foreign_keys(1)&_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)", cfg.CryptoDBPath))
+	if err != nil {
+		return fmt.Errorf("opening crypto database: %w", err)
+	}
+
+	db, err := dbutil.NewWithDB(sqlDB, "sqlite")
+	if err != nil {
+		sqlDB.Close()
+		return fmt.Errorf("wrapping crypto database: %w", err)
+	}
+
+	cryptoHelper, err := cryptohelper.NewCryptoHelper(b.client, []byte(cfg.PickleKey), db)
+	if err != nil {
+		db.Close()
+		return fmt.Errorf("creating crypto helper: %w", err)
+	}
+
+	if err := cryptoHelper.Init(ctx); err != nil {
+		db.Close()
+		return fmt.Errorf("initializing crypto: %w", err)
+	}
+
+	b.client.Crypto = cryptoHelper
+	b.cryptoHelper = cryptoHelper
+
+	slog.Info("e2ee initialized", "device_id", b.client.DeviceID)
+	return nil
+}
+
+func (b *Bot) Run(ctx context.Context, matrixCfg MatrixConfig) error {
+	if err := b.setupCrypto(ctx, matrixCfg); err != nil {
+		return fmt.Errorf("setting up e2ee: %w", err)
+	}
+
 	syncer := b.client.Syncer.(*mautrix.DefaultSyncer)
 
 	syncer.OnEventType(event.StateMember, func(_ context.Context, evt *event.Event) {
@@ -49,6 +112,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	})
 
 	syncer.OnSync(func(ctx context.Context, resp *mautrix.RespSync, since string) bool {
+		if since != "" {
+			b.initialSynced.Store(true)
+		}
 		slog.Debug("sync", "since", since, "joined_rooms", len(resp.Rooms.Join), "invited_rooms", len(resp.Rooms.Invite))
 		return true
 	})
@@ -59,6 +125,13 @@ func (b *Bot) Run(ctx context.Context) error {
 
 func (b *Bot) Stop() {
 	b.client.StopSync()
+}
+
+func (b *Bot) Close() error {
+	if b.cryptoHelper != nil {
+		return b.cryptoHelper.Close()
+	}
+	return nil
 }
 
 func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
@@ -84,6 +157,9 @@ func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 }
 
 func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
+	if !b.initialSynced.Load() {
+		return
+	}
 	if evt.Sender == b.userID {
 		return
 	}
@@ -139,7 +215,8 @@ func (b *Bot) sendReply(ctx context.Context, roomID id.RoomID, text string) {
 			text = ""
 		}
 
-		_, err := b.client.SendText(ctx, roomID, chunk)
+		content := format.RenderMarkdown(chunk, true, false)
+		_, err := b.client.SendMessageEvent(ctx, roomID, event.EventMessage, &content)
 		if err != nil {
 			slog.Error("failed to send message", "room", roomID, "error", err)
 			return

@@ -31,14 +31,14 @@ func (pool *PiPool) Get(ctx context.Context, roomID string) (*PiProcess, error) 
 	}
 	// Remove stale entry if present
 	delete(pool.processes, roomID)
-	pool.mu.Unlock()
 
+	// Hold lock while starting to prevent duplicate processes for the same room.
 	p, err := StartPi(ctx, pool.cfg, roomID)
 	if err != nil {
+		pool.mu.Unlock()
 		return nil, err
 	}
 
-	pool.mu.Lock()
 	pool.processes[roomID] = p
 	pool.mu.Unlock()
 	return p, nil

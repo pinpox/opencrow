@@ -45,12 +45,16 @@ func main() {
 	}()
 
 	slog.Info("opencrow starting")
-	if err := bot.Run(ctx); err != nil {
+	if err := bot.Run(ctx, cfg.Matrix); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("shutdown complete")
 		} else {
 			slog.Error("bot exited with error", "error", err)
 			os.Exit(1)
 		}
+	}
+
+	if err := bot.Close(); err != nil {
+		slog.Error("failed to close bot", "error", err)
 	}
 }

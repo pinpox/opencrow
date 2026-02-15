@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -18,6 +19,8 @@ type MatrixConfig struct {
 	AccessToken  string
 	DeviceID     string
 	AllowedUsers map[string]struct{}
+	PickleKey    string
+	CryptoDBPath string
 }
 
 type PiConfig struct {
@@ -61,6 +64,8 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 
+	workingDir := envOr("OPENCROW_PI_WORKING_DIR", "/var/lib/opencrow")
+
 	cfg := &Config{
 		Matrix: MatrixConfig{
 			Homeserver:   os.Getenv("OPENCROW_MATRIX_HOMESERVER"),
@@ -68,13 +73,15 @@ func LoadConfig() (*Config, error) {
 			AccessToken:  os.Getenv("OPENCROW_MATRIX_ACCESS_TOKEN"),
 			DeviceID:     os.Getenv("OPENCROW_MATRIX_DEVICE_ID"),
 			AllowedUsers: allowedUsers,
+			PickleKey:    envOr("OPENCROW_MATRIX_PICKLE_KEY", "opencrow-default-pickle-key"),
+			CryptoDBPath: envOr("OPENCROW_MATRIX_CRYPTO_DB", filepath.Join(workingDir, "crypto.db")),
 		},
 		Pi: PiConfig{
 			BinaryPath:   envOr("OPENCROW_PI_BINARY", "pi"),
 			SessionDir:   envOr("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
 			Provider:     envOr("OPENCROW_PI_PROVIDER", "anthropic"),
 			Model:        envOr("OPENCROW_PI_MODEL", "claude-sonnet-4-5-20250929"),
-			WorkingDir:   envOr("OPENCROW_PI_WORKING_DIR", "/var/lib/opencrow"),
+			WorkingDir:   workingDir,
 			IdleTimeout:  idleTimeout,
 			SystemPrompt: envOr("OPENCROW_PI_SYSTEM_PROMPT", defaultSystemPrompt),
 			Skills:       skills,

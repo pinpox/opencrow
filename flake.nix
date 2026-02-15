@@ -20,9 +20,10 @@
         {
           opencrow = pkgs.buildGoModule {
             pname = "opencrow";
-            version = "0.2.0";
+            version = "0.3.0";
             src = ./.;
-            vendorHash = "sha256-AlDkfwLVNEsTo8qwc154p4ND1z8dI/g7UWDrY70nSmU=";
+            vendorHash = "sha256-sIircnDhd0cmsq+rmR0FxZDGms4NKuHqQLzp4CMxBeU=";
+            tags = [ "goolm" ];
 
             postInstall = ''
               mkdir -p $out/share/opencrow
