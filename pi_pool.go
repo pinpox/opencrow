@@ -58,6 +58,19 @@ func (pool *PiPool) Remove(roomID string) {
 	}
 }
 
+// Rooms returns the room IDs of all alive pi processes.
+func (pool *PiPool) Rooms() []string {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	rooms := make([]string, 0, len(pool.processes))
+	for roomID, p := range pool.processes {
+		if p.IsAlive() {
+			rooms = append(rooms, roomID)
+		}
+	}
+	return rooms
+}
+
 // StopAll kills all managed pi processes.
 func (pool *PiPool) StopAll() {
 	pool.mu.Lock()

@@ -189,6 +189,54 @@ func (p *PiProcess) Prompt(ctx context.Context, message string) (string, error) 
 	}
 }
 
+// PromptNoTouch is like Prompt but does not update lastUse.
+// Used for heartbeat prompts so idle reaping still works.
+func (p *PiProcess) PromptNoTouch(ctx context.Context, message string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.IsAlive() {
+		return "", fmt.Errorf("pi process is not alive")
+	}
+
+	cmd := map[string]string{
+		"type":    "prompt",
+		"message": message,
+	}
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return "", fmt.Errorf("marshaling prompt: %w", err)
+	}
+	data = append(data, '\n')
+
+	if _, err := p.stdin.Write(data); err != nil {
+		return "", fmt.Errorf("writing to pi stdin: %w", err)
+	}
+
+	type result struct {
+		text string
+		err  error
+	}
+	resultCh := make(chan result, 1)
+
+	go func() {
+		text, err := p.readUntilAgentEnd()
+		resultCh <- result{text, err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		abort := map[string]string{"type": "abort"}
+		abortData, _ := json.Marshal(abort)
+		abortData = append(abortData, '\n')
+		_, _ = p.stdin.Write(abortData)
+		<-resultCh
+		return "", ctx.Err()
+	case r := <-resultCh:
+		return r.text, r.err
+	}
+}
+
 // readUntilAgentEnd reads JSON events from stdout until agent_end is received.
 func (p *PiProcess) readUntilAgentEnd() (string, error) {
 	for p.stdout.Scan() {

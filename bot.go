@@ -134,6 +134,12 @@ func (b *Bot) Close() error {
 	return nil
 }
 
+// SendToRoom sends a text message to a Matrix room by string room ID.
+// Used as a callback for the heartbeat scheduler.
+func (b *Bot) SendToRoom(ctx context.Context, roomID string, text string) {
+	b.sendReply(ctx, id.RoomID(roomID), text)
+}
+
 func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 	mem := evt.Content.AsMember()
 	if mem == nil || mem.Membership != event.MembershipInvite {

@@ -9,8 +9,15 @@ import (
 )
 
 type Config struct {
-	Matrix MatrixConfig
-	Pi     PiConfig
+	Matrix    MatrixConfig
+	Pi        PiConfig
+	Heartbeat HeartbeatConfig
+}
+
+type HeartbeatConfig struct {
+	Interval   time.Duration // OPENCROW_HEARTBEAT_INTERVAL, default 0 (disabled)
+	Prompt     string        // OPENCROW_HEARTBEAT_PROMPT, default built-in
+	TriggerDir string        // OPENCROW_HEARTBEAT_TRIGGER_DIR, default "<working-dir>/triggers"
 }
 
 type MatrixConfig struct {
@@ -66,6 +73,15 @@ func LoadConfig() (*Config, error) {
 
 	workingDir := envOr("OPENCROW_PI_WORKING_DIR", "/var/lib/opencrow")
 
+	var heartbeatInterval time.Duration
+	if v := os.Getenv("OPENCROW_HEARTBEAT_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("parsing OPENCROW_HEARTBEAT_INTERVAL: %w", err)
+		}
+		heartbeatInterval = d
+	}
+
 	cfg := &Config{
 		Matrix: MatrixConfig{
 			Homeserver:   os.Getenv("OPENCROW_MATRIX_HOMESERVER"),
@@ -85,6 +101,11 @@ func LoadConfig() (*Config, error) {
 			IdleTimeout:  idleTimeout,
 			SystemPrompt: loadSoul(),
 			Skills:       skills,
+		},
+		Heartbeat: HeartbeatConfig{
+			Interval:   heartbeatInterval,
+			Prompt:     envOr("OPENCROW_HEARTBEAT_PROMPT", defaultHeartbeatPrompt),
+			TriggerDir: envOr("OPENCROW_HEARTBEAT_TRIGGER_DIR", filepath.Join(workingDir, "triggers")),
 		},
 	}
 
@@ -124,6 +145,10 @@ Be genuinely helpful, not performatively helpful. Skip the filler words — just
 Have opinions. Be resourceful before asking. Earn trust through competence.
 Be concise when needed, thorough when it matters. Not a corporate drone. Not a sycophant. Just good.
 When using tools, prefer standard Unix tools. Check output before proceeding. Break complex tasks into steps and execute them.`
+
+const defaultHeartbeatPrompt = `Read HEARTBEAT.md if it exists. Follow any tasks listed there strictly.
+Do not infer or repeat old tasks from prior conversations.
+If nothing needs attention, reply with exactly: HEARTBEAT_OK`
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

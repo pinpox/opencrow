@@ -33,6 +33,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, bot.SendToRoom)
+	hb.Start(ctx)
+
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

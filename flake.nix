@@ -134,6 +134,18 @@
                     default = "/var/lib/opencrow/pi-agent";
                     description = "Directory where pi stores its agent configuration and data.";
                   };
+
+                  OPENCROW_HEARTBEAT_INTERVAL = lib.mkOption {
+                    type = lib.types.str;
+                    default = "";
+                    description = "Heartbeat interval (Go duration, e.g. '30m'). Empty disables heartbeat.";
+                  };
+
+                  OPENCROW_HEARTBEAT_TRIGGER_DIR = lib.mkOption {
+                    type = lib.types.str;
+                    default = "/var/lib/opencrow/triggers";
+                    description = "Directory for trigger files that wake the heartbeat.";
+                  };
                 };
               };
               default = { };
