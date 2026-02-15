@@ -13,8 +13,11 @@ in
   options.services.opencrow = {
     enable = lib.mkEnableOption "OpenCrow Matrix bot";
 
-    package = lib.mkPackageOption pkgs "opencrow" {
+    package = lib.mkOption {
+      type = lib.types.package;
       default = self.packages.${pkgs.hostPlatform.system}.opencrow;
+      defaultText = lib.literalExpression "opencrow.packages.\${system}.opencrow";
+      description = "The opencrow package to use.";
     };
 
     environmentFile = lib.mkOption {
@@ -42,15 +45,17 @@ in
     };
 
     extraBindMounts = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.submodule {
-        options = {
-          hostPath = lib.mkOption { type = lib.types.str; };
-          isReadOnly = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            hostPath = lib.mkOption { type = lib.types.str; };
+            isReadOnly = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+            };
           };
-        };
-      });
+        }
+      );
       default = { };
       description = "Additional bind mounts into the container.";
     };
@@ -167,27 +172,26 @@ in
       autoStart = true;
       privateNetwork = false;
 
-      bindMounts =
-        {
-          "/var/lib/opencrow" = {
-            hostPath = "/var/lib/opencrow";
-            isReadOnly = false;
-          };
-          "/run/secrets/opencrow-envfile" = {
-            hostPath = builtins.toString cfg.environmentFile;
+      bindMounts = {
+        "/var/lib/opencrow" = {
+          hostPath = "/var/lib/opencrow";
+          isReadOnly = false;
+        };
+        "/run/secrets/opencrow-envfile" = {
+          hostPath = toString cfg.environmentFile;
+          isReadOnly = true;
+        };
+      }
+      // lib.listToAttrs (
+        map (path: {
+          name = "/run/secrets/opencrow-extra-${baseNameOf (toString path)}";
+          value = {
+            hostPath = toString path;
             isReadOnly = true;
           };
-        }
-        // lib.listToAttrs (
-          map (path: {
-            name = "/run/secrets/opencrow-extra-${builtins.baseNameOf (builtins.toString path)}";
-            value = {
-              hostPath = builtins.toString path;
-              isReadOnly = true;
-            };
-          }) cfg.extraEnvironmentFiles
-        )
-        // cfg.extraBindMounts;
+        }) cfg.extraEnvironmentFiles
+      )
+      // cfg.extraBindMounts;
 
       config =
         { ... }:
@@ -205,11 +209,12 @@ in
             environment = cfg.environment;
 
             serviceConfig = {
-              EnvironmentFile =
-                [ "/run/secrets/opencrow-envfile" ]
-                ++ map (
-                  path: "/run/secrets/opencrow-extra-${builtins.baseNameOf (builtins.toString path)}"
-                ) cfg.extraEnvironmentFiles;
+              EnvironmentFile = [
+                "/run/secrets/opencrow-envfile"
+              ]
+              ++ map (
+                path: "/run/secrets/opencrow-extra-${baseNameOf (toString path)}"
+              ) cfg.extraEnvironmentFiles;
               ExecStart = lib.getExe opencrowPkg;
               Restart = "on-failure";
               RestartSec = 10;

@@ -58,9 +58,9 @@ automatically.
 To set it up, run pi once interactively and complete the OAuth flow:
 
 ```
-pi
-# type /login, complete OAuth in browser
-cp ~/.pi/agent/auth.json /var/lib/opencrow/pi-agent/auth.json
+sudo  nixos-container root-login opencrow
+PI_CODING_AGENT_DIR=/var/lib/opencrow/pi-agent pi
+# Then run /login in pi and complete OAuth
 ```
 
 The refresh token persists across restarts -- you only need to do this once
