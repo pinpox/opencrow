@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 )
 
 // HeartbeatScheduler periodically checks HEARTBEAT.md in each room's session
@@ -352,31 +351,9 @@ func isEmptyListItem(line string) bool {
 	return false
 }
 
-// containsHeartbeatOK checks if the response is essentially just HEARTBEAT_OK.
-// It strips the token (including bold markers) and returns true if the remaining
-// content is negligible (< 50 non-whitespace characters).
+// containsHeartbeatOK checks if the response contains HEARTBEAT_OK.
+// If the LLM included the token anywhere in its reply, it's signaling that
+// nothing actionable needs to reach the user — suppress the entire message.
 func containsHeartbeatOK(response string) bool {
-	if response == "" {
-		return false
-	}
-
-	// Strip HEARTBEAT_OK token (with optional bold markers)
-	cleaned := response
-	cleaned = strings.ReplaceAll(cleaned, "**HEARTBEAT_OK**", "")
-	cleaned = strings.ReplaceAll(cleaned, "HEARTBEAT_OK", "")
-
-	// Count non-whitespace chars remaining
-	count := 0
-
-	for _, r := range cleaned {
-		if !unicode.IsSpace(r) {
-			count++
-
-			if count >= 50 {
-				return false
-			}
-		}
-	}
-
-	return true
+	return strings.Contains(response, "HEARTBEAT_OK")
 }
