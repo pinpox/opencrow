@@ -209,6 +209,13 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 
 	slog.Info("received message", "room", roomID, "sender", evt.Sender, "len", len(text))
 
+	if text == "!restart" {
+		b.pool.Remove(roomID)
+		b.sendReply(ctx, evt.RoomID, "Session restarted. Next message will use a fresh process.")
+
+		return
+	}
+
 	pi, err := b.pool.Get(ctx, roomID)
 	if err != nil {
 		slog.Error("failed to get pi process", "room", roomID, "error", err)

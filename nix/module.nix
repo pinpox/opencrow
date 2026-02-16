@@ -119,6 +119,12 @@ in
             description = "Comma-separated list of skill paths to pass to pi via --skill.";
           };
 
+          OPENCROW_PI_SKILLS_DIR = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Directory to scan for skill subdirectories (each must contain SKILL.md). Discovered skills are merged with OPENCROW_PI_SKILLS.";
+          };
+
           OPENCROW_SOUL_FILE = lib.mkOption {
             type = lib.types.str;
             default = "${opencrowPkg}/share/opencrow/SOUL.md";
@@ -194,7 +200,7 @@ in
       // cfg.extraBindMounts;
 
       config =
-        { ... }:
+        { pkgs, ... }:
         {
           system.stateVersion = "25.05";
 
@@ -204,7 +210,7 @@ in
             after = [ "network-online.target" ];
             wants = [ "network-online.target" ];
 
-            path = [ opencrowPkg ] ++ cfg.extraPackages;
+            path = [ opencrowPkg pkgs.bash pkgs.coreutils ] ++ cfg.extraPackages;
 
             environment = cfg.environment;
 

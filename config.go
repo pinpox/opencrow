@@ -124,6 +124,40 @@ func parseSkills() []string {
 		}
 	}
 
+	if dir := os.Getenv("OPENCROW_PI_SKILLS_DIR"); dir != "" {
+		discovered := discoverSkills(dir)
+		skills = append(skills, discovered...)
+	}
+
+	return skills
+}
+
+// discoverSkills scans a directory for subdirectories containing SKILL.md.
+func discoverSkills(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "warning: failed to read skills dir %s: %v\n", dir, err)
+		}
+
+		return nil
+	}
+
+	var skills []string
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		skillPath := filepath.Join(dir, entry.Name())
+		skillFile := filepath.Join(skillPath, "SKILL.md")
+
+		if _, err := os.Stat(skillFile); err == nil {
+			skills = append(skills, skillPath)
+		}
+	}
+
 	return skills
 }
 
