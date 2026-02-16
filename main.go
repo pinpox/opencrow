@@ -43,6 +43,10 @@ func run() int {
 	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, bot.SendToRoom)
 	hb.Start(ctx)
 
+	triggerMgr := NewTriggerPipeManager(pool, cfg.Pi, defaultTriggerPrompt, bot.SendToRoom)
+	triggerMgr.Start(ctx)
+	bot.SetTriggerPipeManager(triggerMgr)
+
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

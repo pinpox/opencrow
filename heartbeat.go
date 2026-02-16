@@ -12,7 +12,6 @@ import (
 
 // HeartbeatScheduler periodically checks HEARTBEAT.md in each room's session
 // directory and prompts the pi process if there are tasks to attend to.
-// It also watches for trigger files from external processes.
 type HeartbeatScheduler struct {
 	pool      *PiPool
 	cfg       HeartbeatConfig
@@ -39,7 +38,7 @@ func NewHeartbeatScheduler(
 }
 
 // Start begins the heartbeat loop. It ticks every minute, checking each room
-// for due heartbeats or trigger files. Stops when ctx is cancelled.
+// for due heartbeats. Stops when ctx is cancelled.
 func (h *HeartbeatScheduler) Start(ctx context.Context) {
 	if h.cfg.Interval <= 0 {
 		slog.Info("heartbeat disabled (interval not set)")
@@ -64,13 +63,10 @@ func (h *HeartbeatScheduler) Start(ctx context.Context) {
 	}()
 }
 
-// tickAll checks all rooms and trigger files.
+// tickAll checks all rooms for due heartbeats.
 func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 	// Collect rooms with live pi processes
 	rooms := h.pool.Rooms()
-
-	// Check for trigger files
-	triggers := h.readTriggers()
 
 	// Scan session directories for rooms with a HEARTBEAT.md on disk
 	heartbeatRooms := h.scanSessionDirs()
@@ -85,113 +81,23 @@ func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 		roomSet[r] = struct{}{}
 	}
 
-	for r := range triggers {
-		roomSet[r] = struct{}{}
-	}
-
 	h.mu.Lock()
 	now := time.Now()
 	h.mu.Unlock()
 
 	for roomID := range roomSet {
-		h.ensureTriggerDir(roomID)
-
-		triggerCtx := triggers[roomID]
-
 		h.mu.Lock()
 		last := h.lastBeat[roomID]
 		due := time.Since(last) >= h.cfg.Interval
 		h.mu.Unlock()
 
-		if triggerCtx != "" || due {
-			h.tick(ctx, roomID, triggerCtx)
+		if due {
+			h.tick(ctx, roomID)
 
 			h.mu.Lock()
 			h.lastBeat[roomID] = now
 			h.mu.Unlock()
 		}
-	}
-}
-
-// readTriggers walks session subdirectories, reads all files from each
-// room's triggers/ spool directory, concatenates their contents, and deletes
-// them. Returns a map of room ID -> combined trigger content.
-func (h *HeartbeatScheduler) readTriggers() map[string]string {
-	triggers := make(map[string]string)
-
-	sessionEntries, err := os.ReadDir(h.piCfg.SessionDir)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("failed to read session directory", "path", h.piCfg.SessionDir, "error", err)
-		}
-
-		return triggers
-	}
-
-	for _, entry := range sessionEntries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		dir := filepath.Join(h.piCfg.SessionDir, entry.Name())
-
-		// Read the original room ID
-		data, readErr := os.ReadFile(filepath.Join(dir, ".room_id"))
-		if readErr != nil {
-			continue
-		}
-
-		roomID := strings.TrimSpace(string(data))
-		if roomID == "" {
-			continue
-		}
-
-		triggerDir := filepath.Join(dir, "triggers")
-
-		triggerFiles, dirErr := os.ReadDir(triggerDir)
-		if dirErr != nil {
-			continue
-		}
-
-		var parts []string
-
-		for _, tf := range triggerFiles {
-			if tf.IsDir() {
-				continue
-			}
-
-			tfPath := filepath.Join(triggerDir, tf.Name())
-
-			content, rfErr := os.ReadFile(tfPath)
-			if rfErr != nil {
-				slog.Warn("failed to read trigger file", "path", tfPath, "error", rfErr)
-
-				continue
-			}
-
-			if removeErr := os.Remove(tfPath); removeErr != nil {
-				slog.Warn("failed to remove trigger file", "path", tfPath, "error", removeErr)
-			}
-
-			if s := strings.TrimSpace(string(content)); s != "" {
-				parts = append(parts, s)
-			}
-		}
-
-		if len(parts) > 0 {
-			triggers[roomID] = strings.Join(parts, "\n\n")
-		}
-	}
-
-	return triggers
-}
-
-// ensureTriggerDir creates the triggers/ spool directory inside a room's
-// session directory so external writers can assume it exists.
-func (h *HeartbeatScheduler) ensureTriggerDir(roomID string) {
-	dir := filepath.Join(h.piCfg.SessionDir, sanitizeRoomID(roomID), "triggers")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		slog.Warn("failed to create trigger directory", "room", roomID, "path", dir, "error", err)
 	}
 }
 
@@ -240,7 +146,7 @@ func (h *HeartbeatScheduler) scanSessionDirs() []string {
 }
 
 // tick performs a single heartbeat for a room.
-func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string, triggerContext string) {
+func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) {
 	sessionDir := filepath.Join(h.piCfg.SessionDir, sanitizeRoomID(roomID))
 	heartbeatPath := filepath.Join(sessionDir, "HEARTBEAT.md")
 
@@ -251,12 +157,12 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string, triggerCon
 
 	content := strings.TrimSpace(string(heartbeatContent))
 
-	// If no heartbeat file content and no trigger, skip
-	if isEffectivelyEmpty(content) && triggerContext == "" {
+	// If no heartbeat file content, skip
+	if isEffectivelyEmpty(content) {
 		return
 	}
 
-	slog.Info("heartbeat firing", "room", roomID, "has_heartbeat_md", !isEffectivelyEmpty(content), "has_trigger", triggerContext != "")
+	slog.Info("heartbeat firing", "room", roomID)
 
 	pi, err := h.pool.Get(ctx, roomID)
 	if err != nil {
@@ -265,7 +171,7 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string, triggerCon
 		return
 	}
 
-	prompt := buildHeartbeatPrompt(h.cfg.Prompt, content, triggerContext)
+	prompt := buildHeartbeatPrompt(h.cfg.Prompt, content)
 
 	reply, err := pi.PromptNoTouch(ctx, prompt)
 	if err != nil {
@@ -290,7 +196,7 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string, triggerCon
 	h.sendReply(ctx, roomID, reply)
 }
 
-func buildHeartbeatPrompt(basePrompt, content, triggerContext string) string {
+func buildHeartbeatPrompt(basePrompt, content string) string {
 	var prompt strings.Builder
 
 	prompt.WriteString(basePrompt)
@@ -299,12 +205,6 @@ func buildHeartbeatPrompt(basePrompt, content, triggerContext string) string {
 		prompt.WriteString("\n\n--- HEARTBEAT.md contents ---\n")
 		prompt.WriteString(content)
 		prompt.WriteString("\n--- end HEARTBEAT.md ---")
-	}
-
-	if triggerContext != "" {
-		prompt.WriteString("\n\n--- External trigger ---\n")
-		prompt.WriteString(triggerContext)
-		prompt.WriteString("\n--- end trigger ---")
 	}
 
 	return prompt.String()

@@ -242,6 +242,9 @@ const defaultHeartbeatPrompt = `Read HEARTBEAT.md if it exists. Follow any tasks
 Do not infer or repeat old tasks from prior conversations.
 If nothing needs attention, reply with exactly: HEARTBEAT_OK`
 
+const defaultTriggerPrompt = `An external process sent a trigger message. Read the content below and act on it.
+If nothing needs attention, reply with exactly: HEARTBEAT_OK`
+
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

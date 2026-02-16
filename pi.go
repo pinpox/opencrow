@@ -42,6 +42,11 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, erro
 		return nil, fmt.Errorf("writing room ID file: %w", err)
 	}
 
+	// Create the trigger FIFO so external processes can write to it immediately.
+	if err := ensureFIFO(TriggerPipePath(cfg.SessionDir, roomID)); err != nil {
+		return nil, fmt.Errorf("creating trigger FIFO: %w", err)
+	}
+
 	args := buildPiArgs(cfg, sessionDir)
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config

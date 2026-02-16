@@ -23,7 +23,8 @@ graph LR
     Skills["SKILL.md files"] -->|"--skill"| Pi
     HB["HEARTBEAT.md"] -->|read| Sched[HeartbeatScheduler]
     Timer["Timer (every N min)"] --> Sched
-    Ext["External process"] -->|".trigger file"| Sched
+    Ext["External process"] -->|"trigger.pipe"| TrigMgr[TriggerPipeManager]
+    TrigMgr -->|PromptNoTouch| Pi
     Sched -->|PromptNoTouch| Pi
     Pi -->|"HEARTBEAT_OK"| Suppress(suppress)
     Pi -->|real content| Bot
@@ -140,28 +141,26 @@ Anything else is delivered to the Matrix room.
 Heartbeat prompts do not reset the idle timer -- if no real user messages arrive,
 the pi process is still reaped after the idle timeout.
 
-### Trigger files
+### Trigger pipes
 
 External processes (cron jobs, mail watchers, webhooks) can wake the bot
-immediately by dropping a trigger file into a room's spool directory:
+immediately by writing to a room's named pipe (FIFO):
 
 ```
-<session-dir>/<sanitized-room-id>/triggers/<unique-filename>
+<session-dir>/<sanitized-room-id>/trigger.pipe
 ```
 
-Each room's `triggers/` directory is created automatically by the scheduler.
-Every file in the directory is read, its content is concatenated (separated by
-blank lines), and the file is deleted. This means multiple triggers can arrive
-between ticks without overwriting each other — each one is a separate file.
+Each room's `trigger.pipe` is created automatically when the session directory
+is set up. A dedicated goroutine reads from the pipe and delivers the content
+to pi immediately — no waiting for the heartbeat tick.
 
-Example (using a timestamp for uniqueness):
+Example:
 
 ```
-echo "New email from alice@example.com" > /var/lib/opencrow/sessions/roomid-matrix.org/triggers/"$(date +%s%N)"
+echo "New email from alice@example.com" > /var/lib/opencrow/sessions/roomid-matrix.org/trigger.pipe
 ```
 
-For atomic writes, write to a `.tmp` file first and rename into the `triggers/`
-directory.
+Each line written to the pipe is processed as a separate trigger.
 
 ### Configuration
 

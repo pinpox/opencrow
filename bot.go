@@ -31,9 +31,15 @@ type Bot struct {
 	client        *mautrix.Client
 	cryptoHelper  *cryptohelper.CryptoHelper
 	pool          *PiPool
+	triggerMgr    *TriggerPipeManager
 	userID        id.UserID
 	allowedUsers  map[string]struct{}
 	initialSynced atomic.Bool
+}
+
+// SetTriggerPipeManager sets the trigger pipe manager on the bot.
+func (b *Bot) SetTriggerPipeManager(mgr *TriggerPipeManager) {
+	b.triggerMgr = mgr
 }
 
 func NewBot(cfg MatrixConfig, pool *PiPool) (*Bot, error) {
@@ -238,6 +244,10 @@ func (b *Bot) handleLeave(ctx context.Context, evt *event.Event, mem *event.Memb
 
 // cleanupRoom kills the pi process and removes the session directory for a room.
 func (b *Bot) cleanupRoom(roomID string) {
+	if b.triggerMgr != nil {
+		b.triggerMgr.StopRoom(roomID)
+	}
+
 	b.pool.Remove(roomID)
 
 	sessionDir := filepath.Join(b.pool.cfg.SessionDir, sanitizeRoomID(roomID))
@@ -326,6 +336,10 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		b.sendReply(ctx, evt.RoomID, fmt.Sprintf("Error starting AI backend: %v", err))
 
 		return
+	}
+
+	if b.triggerMgr != nil {
+		b.triggerMgr.StartRoom(ctx, roomID)
 	}
 
 	reply, err := pi.Prompt(ctx, text)
