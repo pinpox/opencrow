@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -262,14 +264,39 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	msg := evt.Content.AsMessage()
-	if msg == nil || msg.MsgType != event.MsgText {
+	if msg == nil {
+		return
+	}
+
+	switch msg.MsgType {
+	case event.MsgText, event.MsgImage, event.MsgFile, event.MsgAudio, event.MsgVideo:
+		// supported
+	default:
 		return
 	}
 
 	roomID := string(evt.RoomID)
 	text := msg.Body
 
-	slog.Info("received message", "room", roomID, "sender", evt.Sender, "len", len(text))
+	slog.Info("received message", "room", roomID, "sender", evt.Sender, "type", msg.MsgType, "len", len(text))
+
+	// For file/image/audio/video messages, download the attachment and rewrite the prompt
+	if msg.MsgType != event.MsgText {
+		filePath, err := b.downloadAttachment(ctx, msg, roomID)
+		if err != nil {
+			slog.Error("failed to download attachment", "room", roomID, "error", err)
+			b.sendReply(ctx, evt.RoomID, fmt.Sprintf("Failed to download attachment: %v", err))
+
+			return
+		}
+
+		caption := msg.Body
+		if caption == "" || caption == msg.FileName {
+			caption = "no caption"
+		}
+
+		text = fmt.Sprintf("[User sent a file (%s): %s]\nUse the read tool to view it.", caption, filePath)
+	}
 
 	if text == "!restart" {
 		b.pool.Remove(roomID)
@@ -299,6 +326,88 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	b.sendReply(ctx, evt.RoomID, reply)
+}
+
+// downloadAttachment downloads a Matrix media attachment to the session directory.
+// Handles both unencrypted (msg.URL) and encrypted (msg.File) media.
+// Returns the local file path.
+func (b *Bot) downloadAttachment(ctx context.Context, msg *event.MessageEventContent, roomID string) (string, error) {
+	var urlStr id.ContentURIString
+
+	encrypted := msg.File != nil && msg.File.URL != ""
+	if encrypted {
+		urlStr = msg.File.URL
+	} else if msg.URL != "" {
+		urlStr = msg.URL
+	} else {
+		return "", errors.New("message has no media URL")
+	}
+
+	mxcURL, err := urlStr.Parse()
+	if err != nil {
+		return "", fmt.Errorf("parsing mxc URL: %w", err)
+	}
+
+	sessionDir := filepath.Join(b.pool.cfg.SessionDir, sanitizeRoomID(roomID))
+	downloadDir := filepath.Join(sessionDir, "attachments")
+
+	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating attachments dir: %w", err)
+	}
+
+	filename := msg.FileName
+	if filename == "" {
+		filename = msg.Body
+	}
+
+	if filename == "" {
+		filename = "image.png"
+	}
+
+	// Strip directory components to prevent path traversal
+	filename = filepath.Base(filename)
+
+	destPath := filepath.Join(downloadDir, filename)
+
+	if encrypted {
+		ciphertext, err := b.client.DownloadBytes(ctx, mxcURL)
+		if err != nil {
+			return "", fmt.Errorf("downloading encrypted media: %w", err)
+		}
+
+		plaintext, err := msg.File.Decrypt(ciphertext)
+		if err != nil {
+			return "", fmt.Errorf("decrypting media: %w", err)
+		}
+
+		if err := os.WriteFile(destPath, plaintext, 0o644); err != nil {
+			return "", fmt.Errorf("writing decrypted file: %w", err)
+		}
+	} else {
+		resp, err := b.client.Download(ctx, mxcURL)
+		if err != nil {
+			return "", fmt.Errorf("downloading from matrix: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("download returned status %d", resp.StatusCode)
+		}
+
+		f, err := os.Create(destPath)
+		if err != nil {
+			return "", fmt.Errorf("creating file: %w", err)
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(f, resp.Body); err != nil {
+			return "", fmt.Errorf("writing file: %w", err)
+		}
+	}
+
+	slog.Info("downloaded attachment", "room", roomID, "path", destPath, "encrypted", encrypted)
+
+	return destPath, nil
 }
 
 func (b *Bot) sendReply(ctx context.Context, roomID id.RoomID, text string) {
