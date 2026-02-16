@@ -305,6 +305,18 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		return
 	}
 
+	if text == "!skills" {
+		b.sendReply(ctx, evt.RoomID, b.pool.SkillsSummary())
+
+		return
+	}
+
+	if text == "!rooms" {
+		b.sendReply(ctx, evt.RoomID, b.pool.RoomsSummary())
+
+		return
+	}
+
 	pi, err := b.pool.Get(ctx, roomID)
 	if err != nil {
 		slog.Error("failed to get pi process", "room", roomID, "error", err)
