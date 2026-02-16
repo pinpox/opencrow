@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync/atomic"
 
 	"github.com/rs/zerolog"
@@ -337,7 +340,19 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		reply = "(empty response)"
 	}
 
-	b.sendReply(ctx, evt.RoomID, reply)
+	// Extract <sendfile> tags and upload any referenced files
+	cleanReply, filePaths := extractSendFiles(reply)
+
+	for _, fp := range filePaths {
+		if err := b.sendFile(ctx, evt.RoomID, fp); err != nil {
+			slog.Error("failed to send file", "room", roomID, "path", fp, "error", err)
+			cleanReply += fmt.Sprintf("\n\n(failed to send file %s: %v)", filepath.Base(fp), err)
+		}
+	}
+
+	if cleanReply != "" {
+		b.sendReply(ctx, evt.RoomID, cleanReply)
+	}
 }
 
 // downloadAttachment downloads a Matrix media attachment to the session directory.
@@ -420,6 +435,84 @@ func (b *Bot) downloadAttachment(ctx context.Context, msg *event.MessageEventCon
 	slog.Info("downloaded attachment", "room", roomID, "path", destPath, "encrypted", encrypted)
 
 	return destPath, nil
+}
+
+var sendFileRe = regexp.MustCompile(`<sendfile>\s*(.*?)\s*</sendfile>`)
+
+// extractSendFiles finds all <sendfile>/path</sendfile> tags in text,
+// returns the cleaned text with tags stripped and the list of file paths.
+func extractSendFiles(text string) (string, []string) {
+	matches := sendFileRe.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return text, nil
+	}
+
+	var paths []string
+	for _, m := range matches {
+		p := strings.TrimSpace(m[1])
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+
+	cleaned := sendFileRe.ReplaceAllString(text, "")
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned, paths
+}
+
+// sendFile reads a file from disk, uploads it to Matrix, and sends it as an attachment message.
+func (b *Bot) sendFile(ctx context.Context, roomID id.RoomID, filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("reading file: %w", err)
+	}
+
+	// Detect MIME type: try extension first, fall back to content sniffing
+	contentType := mime.TypeByExtension(filepath.Ext(filePath))
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+
+	resp, err := b.client.UploadMedia(ctx, mautrix.ReqUploadMedia{
+		ContentBytes: data,
+		ContentType:  contentType,
+		FileName:     filepath.Base(filePath),
+	})
+	if err != nil {
+		return fmt.Errorf("uploading media: %w", err)
+	}
+
+	// Pick appropriate message type based on MIME category
+	msgType := event.MsgFile
+	switch {
+	case strings.HasPrefix(contentType, "image/"):
+		msgType = event.MsgImage
+	case strings.HasPrefix(contentType, "audio/"):
+		msgType = event.MsgAudio
+	case strings.HasPrefix(contentType, "video/"):
+		msgType = event.MsgVideo
+	}
+
+	content := &event.MessageEventContent{
+		MsgType:  msgType,
+		Body:     filepath.Base(filePath),
+		URL:      resp.ContentURI.CUString(),
+		FileName: filepath.Base(filePath),
+		Info: &event.FileInfo{
+			MimeType: contentType,
+			Size:     len(data),
+		},
+	}
+
+	_, err = b.client.SendMessageEvent(ctx, roomID, event.EventMessage, content)
+	if err != nil {
+		return fmt.Errorf("sending file message: %w", err)
+	}
+
+	slog.Info("sent file to room", "room", roomID, "path", filePath, "mime", contentType, "size", len(data))
+
+	return nil
 }
 
 func (b *Bot) sendReply(ctx context.Context, roomID id.RoomID, text string) {
