@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 
 	"github.com/rs/zerolog"
@@ -69,7 +70,7 @@ func (b *Bot) Run(ctx context.Context, matrixCfg MatrixConfig) error {
 	}
 
 	syncer.OnEventType(event.StateMember, func(_ context.Context, evt *event.Event) {
-		go b.handleInvite(ctx, evt)
+		go b.handleMembership(ctx, evt)
 	})
 
 	syncer.OnEventType(event.EventMessage, func(_ context.Context, evt *event.Event) {
@@ -158,12 +159,25 @@ func (b *Bot) setupCrypto(ctx context.Context, cfg MatrixConfig) error {
 	return nil
 }
 
-func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
-	mem := evt.Content.AsMember()
-	if mem == nil || mem.Membership != event.MembershipInvite {
+func (b *Bot) handleMembership(ctx context.Context, evt *event.Event) {
+	if !b.initialSynced.Load() {
 		return
 	}
 
+	mem := evt.Content.AsMember()
+	if mem == nil {
+		return
+	}
+
+	switch mem.Membership {
+	case event.MembershipInvite:
+		b.handleInvite(ctx, evt)
+	case event.MembershipLeave, event.MembershipBan:
+		b.handleLeave(ctx, evt, mem)
+	}
+}
+
+func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 	if id.UserID(*evt.StateKey) != b.userID {
 		return
 	}
@@ -182,6 +196,54 @@ func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 	if err != nil {
 		slog.Error("failed to join room", "room", evt.RoomID, "error", err)
 	}
+}
+
+func (b *Bot) handleLeave(ctx context.Context, evt *event.Event, mem *event.MemberEventContent) {
+	target := id.UserID(*evt.StateKey)
+	roomID := string(evt.RoomID)
+
+	// Bot itself was removed or banned
+	if target == b.userID {
+		slog.Info("bot removed from room, cleaning up", "room", roomID, "membership", mem.Membership)
+		b.cleanupRoom(roomID)
+
+		return
+	}
+
+	// Another user left — check if the bot is now alone
+	members, err := b.client.JoinedMembers(ctx, evt.RoomID)
+	if err != nil {
+		slog.Warn("failed to query room members", "room", roomID, "error", err)
+
+		return
+	}
+
+	if len(members.Joined) > 1 {
+		return
+	}
+
+	slog.Info("bot is alone in room, leaving and cleaning up", "room", roomID)
+
+	if _, err := b.client.LeaveRoom(ctx, evt.RoomID); err != nil {
+		slog.Error("failed to leave room", "room", roomID, "error", err)
+	}
+
+	b.cleanupRoom(roomID)
+}
+
+// cleanupRoom kills the pi process and removes the session directory for a room.
+func (b *Bot) cleanupRoom(roomID string) {
+	b.pool.Remove(roomID)
+
+	sessionDir := filepath.Join(b.pool.cfg.SessionDir, sanitizeRoomID(roomID))
+
+	if err := os.RemoveAll(sessionDir); err != nil {
+		slog.Error("failed to remove session directory", "room", roomID, "path", sessionDir, "error", err)
+
+		return
+	}
+
+	slog.Info("removed session directory", "room", roomID, "path", sessionDir)
 }
 
 func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
