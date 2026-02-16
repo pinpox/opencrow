@@ -20,21 +20,15 @@ in
       description = "The opencrow package to use.";
     };
 
-    environmentFile = lib.mkOption {
-      type = lib.types.path;
+    environmentFiles = lib.mkOption {
+      type = lib.types.listOf lib.types.path;
       description = ''
-        Path to an environment file containing secrets (on the host).
+        List of environment files containing secrets (on the host).
         Bind-mounted read-only into the container.
-        Must define at minimum:
+        Must define at minimum (across all files):
         - OPENCROW_MATRIX_ACCESS_TOKEN
         - ANTHROPIC_API_KEY (or the appropriate key for your provider)
       '';
-    };
-
-    extraEnvironmentFiles = lib.mkOption {
-      type = lib.types.listOf lib.types.path;
-      default = [ ];
-      description = "Additional environment files bind-mounted into the container.";
     };
 
     extraPackages = lib.mkOption {
@@ -183,19 +177,15 @@ in
           hostPath = "/var/lib/opencrow";
           isReadOnly = false;
         };
-        "/run/secrets/opencrow-envfile" = {
-          hostPath = toString cfg.environmentFile;
-          isReadOnly = true;
-        };
       }
       // lib.listToAttrs (
-        map (path: {
-          name = "/run/secrets/opencrow-extra-${baseNameOf (toString path)}";
+        lib.imap0 (i: path: {
+          name = "/run/secrets/opencrow-envfile-${toString i}";
           value = {
             hostPath = toString path;
             isReadOnly = true;
           };
-        }) cfg.extraEnvironmentFiles
+        }) cfg.environmentFiles
       )
       // cfg.extraBindMounts;
 
@@ -215,12 +205,8 @@ in
             environment = cfg.environment;
 
             serviceConfig = {
-              EnvironmentFile = [
-                "/run/secrets/opencrow-envfile"
-              ]
-              ++ map (
-                path: "/run/secrets/opencrow-extra-${baseNameOf (toString path)}"
-              ) cfg.extraEnvironmentFiles;
+              EnvironmentFile =
+                lib.imap0 (i: _: "/run/secrets/opencrow-envfile-${toString i}") cfg.environmentFiles;
               ExecStart = lib.getExe opencrowPkg;
               Restart = "on-failure";
               RestartSec = 10;
