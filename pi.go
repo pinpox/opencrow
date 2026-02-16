@@ -36,6 +36,12 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, erro
 		return nil, fmt.Errorf("creating session dir: %w", err)
 	}
 
+	// Persist the original room ID so the heartbeat scanner can map directories back.
+	roomIDPath := filepath.Join(sessionDir, ".room_id")
+	if err := os.WriteFile(roomIDPath, []byte(roomID), 0o644); err != nil {
+		return nil, fmt.Errorf("writing room ID file: %w", err)
+	}
+
 	args := buildPiArgs(cfg, sessionDir)
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
