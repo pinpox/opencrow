@@ -16,9 +16,8 @@ type Config struct {
 }
 
 type HeartbeatConfig struct {
-	Interval   time.Duration // OPENCROW_HEARTBEAT_INTERVAL, default 0 (disabled)
-	Prompt     string        // OPENCROW_HEARTBEAT_PROMPT, default built-in
-	TriggerDir string        // OPENCROW_HEARTBEAT_TRIGGER_DIR, default "<working-dir>/triggers"
+	Interval time.Duration // OPENCROW_HEARTBEAT_INTERVAL, default 0 (disabled)
+	Prompt   string        // OPENCROW_HEARTBEAT_PROMPT, default built-in
 }
 
 type MatrixConfig struct {
@@ -78,9 +77,8 @@ func LoadConfig() (*Config, error) {
 			Skills:       skills,
 		},
 		Heartbeat: HeartbeatConfig{
-			Interval:   heartbeatInterval,
-			Prompt:     envOr("OPENCROW_HEARTBEAT_PROMPT", defaultHeartbeatPrompt),
-			TriggerDir: envOr("OPENCROW_HEARTBEAT_TRIGGER_DIR", filepath.Join(workingDir, "triggers")),
+			Interval: heartbeatInterval,
+			Prompt:   envOr("OPENCROW_HEARTBEAT_PROMPT", defaultHeartbeatPrompt),
 		},
 	}
 

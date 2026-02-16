@@ -48,11 +48,7 @@ func (h *HeartbeatScheduler) Start(ctx context.Context) {
 		return
 	}
 
-	if err := os.MkdirAll(h.cfg.TriggerDir, 0o755); err != nil {
-		slog.Error("failed to create trigger directory", "path", h.cfg.TriggerDir, "error", err)
-	}
-
-	slog.Info("heartbeat scheduler started", "interval", h.cfg.Interval, "trigger_dir", h.cfg.TriggerDir)
+	slog.Info("heartbeat scheduler started", "interval", h.cfg.Interval)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
@@ -99,6 +95,8 @@ func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 	h.mu.Unlock()
 
 	for roomID := range roomSet {
+		h.ensureTriggerDir(roomID)
+
 		triggerCtx := triggers[roomID]
 
 		h.mu.Lock()
@@ -116,48 +114,86 @@ func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 	}
 }
 
-// readTriggers reads and removes trigger files from the trigger directory.
-// Returns a map of room ID -> trigger content.
+// readTriggers walks session subdirectories, reads all files from each
+// room's triggers/ spool directory, concatenates their contents, and deletes
+// them. Returns a map of room ID -> combined trigger content.
 func (h *HeartbeatScheduler) readTriggers() map[string]string {
 	triggers := make(map[string]string)
 
-	entries, err := os.ReadDir(h.cfg.TriggerDir)
+	sessionEntries, err := os.ReadDir(h.piCfg.SessionDir)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			slog.Warn("failed to read trigger directory", "path", h.cfg.TriggerDir, "error", err)
+			slog.Warn("failed to read session directory", "path", h.piCfg.SessionDir, "error", err)
 		}
 
 		return triggers
 	}
 
-	for _, entry := range entries {
-		name := entry.Name()
-
-		if !strings.HasSuffix(name, ".trigger") {
+	for _, entry := range sessionEntries {
+		if !entry.IsDir() {
 			continue
 		}
 
-		roomID := strings.TrimSuffix(name, ".trigger")
-		path := filepath.Join(h.cfg.TriggerDir, name)
+		dir := filepath.Join(h.piCfg.SessionDir, entry.Name())
 
-		data, readErr := os.ReadFile(path)
+		// Read the original room ID
+		data, readErr := os.ReadFile(filepath.Join(dir, ".room_id"))
 		if readErr != nil {
-			slog.Warn("failed to read trigger file", "path", path, "error", readErr)
-
 			continue
 		}
 
-		if removeErr := os.Remove(path); removeErr != nil {
-			slog.Warn("failed to remove trigger file", "path", path, "error", removeErr)
+		roomID := strings.TrimSpace(string(data))
+		if roomID == "" {
+			continue
 		}
 
-		content := strings.TrimSpace(string(data))
-		if content != "" {
-			triggers[roomID] = content
+		triggerDir := filepath.Join(dir, "triggers")
+
+		triggerFiles, dirErr := os.ReadDir(triggerDir)
+		if dirErr != nil {
+			continue
+		}
+
+		var parts []string
+
+		for _, tf := range triggerFiles {
+			if tf.IsDir() {
+				continue
+			}
+
+			tfPath := filepath.Join(triggerDir, tf.Name())
+
+			content, rfErr := os.ReadFile(tfPath)
+			if rfErr != nil {
+				slog.Warn("failed to read trigger file", "path", tfPath, "error", rfErr)
+
+				continue
+			}
+
+			if removeErr := os.Remove(tfPath); removeErr != nil {
+				slog.Warn("failed to remove trigger file", "path", tfPath, "error", removeErr)
+			}
+
+			if s := strings.TrimSpace(string(content)); s != "" {
+				parts = append(parts, s)
+			}
+		}
+
+		if len(parts) > 0 {
+			triggers[roomID] = strings.Join(parts, "\n\n")
 		}
 	}
 
 	return triggers
+}
+
+// ensureTriggerDir creates the triggers/ spool directory inside a room's
+// session directory so external writers can assume it exists.
+func (h *HeartbeatScheduler) ensureTriggerDir(roomID string) {
+	dir := filepath.Join(h.piCfg.SessionDir, sanitizeRoomID(roomID), "triggers")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("failed to create trigger directory", "room", roomID, "path", dir, "error", err)
+	}
 }
 
 // scanSessionDirs walks the session directory and returns room IDs for any

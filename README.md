@@ -33,6 +33,29 @@ Each room gets its own pi process with an isolated session directory. The Go bot
 receives Matrix messages, forwards them to the room's pi process, collects the
 response, and sends it back.
 
+## Bot commands
+
+Send these as plain text messages in any room with the bot:
+
+| Command | Description |
+|---|---|
+| `!restart` | Kill the current pi process and start fresh on the next message |
+| `!skills` | List the skills loaded for this bot instance |
+| `!rooms` | Show all rooms with active pi processes |
+
+## File handling
+
+**Receiving files** -- Users can send images, audio, video, and documents to the
+bot. Attachments are downloaded to the room's session directory under
+`attachments/` and the file path is passed to pi so it can read or process the
+file with its tools.
+
+**Sending files back** -- Pi can send files to the user by including
+`<sendfile>/absolute/path</sendfile>` tags in its response. The bot strips the
+tags, uploads each referenced file to Matrix, and delivers them as attachments.
+Multiple `<sendfile>` tags can appear in a single response. The default system
+prompt (and `SOUL.md`) includes instructions so pi knows about this convention.
+
 ## No safety guarantees
 
 There is no whitelisting, permission system, or tool filtering. Trying to bolt
@@ -120,18 +143,25 @@ the pi process is still reaped after the idle timeout.
 ### Trigger files
 
 External processes (cron jobs, mail watchers, webhooks) can wake the bot
-immediately by dropping a trigger file:
+immediately by dropping a trigger file into a room's spool directory:
 
 ```
-echo "New email from alice@example.com" > /var/lib/opencrow/triggers/'!roomid:matrix.org.trigger'
+<session-dir>/<sanitized-room-id>/triggers/<unique-filename>
 ```
 
-The scheduler picks up `<room-id>.trigger` files on its next tick, passes the
-file content as extra context to the heartbeat prompt, and deletes the file. For
-atomic writes, write to a `.tmp` file first and rename.
+Each room's `triggers/` directory is created automatically by the scheduler.
+Every file in the directory is read, its content is concatenated (separated by
+blank lines), and the file is deleted. This means multiple triggers can arrive
+between ticks without overwriting each other — each one is a separate file.
 
-The trigger directory defaults to `<working-dir>/triggers` and can be overridden
-with `OPENCROW_HEARTBEAT_TRIGGER_DIR`.
+Example (using a timestamp for uniqueness):
+
+```
+echo "New email from alice@example.com" > /var/lib/opencrow/sessions/roomid-matrix.org/triggers/"$(date +%s%N)"
+```
+
+For atomic writes, write to a `.tmp` file first and rename into the `triggers/`
+directory.
 
 ### Configuration
 
@@ -139,4 +169,3 @@ with `OPENCROW_HEARTBEAT_TRIGGER_DIR`.
 |---|---|---|
 | `OPENCROW_HEARTBEAT_INTERVAL` | _(empty, disabled)_ | How often to run heartbeats per room (Go duration) |
 | `OPENCROW_HEARTBEAT_PROMPT` | built-in | Custom prompt sent with the HEARTBEAT.md contents |
-| `OPENCROW_HEARTBEAT_TRIGGER_DIR` | `<working-dir>/triggers` | Directory for trigger files |
