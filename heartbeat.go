@@ -68,8 +68,8 @@ func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 	// Collect rooms with live pi processes
 	rooms := h.pool.Rooms()
 
-	// Scan session directories for rooms with a HEARTBEAT.md on disk
-	heartbeatRooms := h.scanSessionDirs()
+	// Check the session directory for a HEARTBEAT.md on disk
+	heartbeatRooms := h.scanSessionDir()
 
 	// Merge all room sources
 	roomSet := make(map[string]struct{})
@@ -101,54 +101,32 @@ func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 	}
 }
 
-// scanSessionDirs walks the session directory and returns room IDs for any
-// session that has a HEARTBEAT.md file on disk. This ensures heartbeats fire
-// even when the pi process has been reaped due to idle timeout.
-func (h *HeartbeatScheduler) scanSessionDirs() []string {
-	entries, err := os.ReadDir(h.piCfg.SessionDir)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("failed to read session directory", "path", h.piCfg.SessionDir, "error", err)
-		}
-
+// scanSessionDir checks the session directory for a HEARTBEAT.md file on disk.
+// This ensures heartbeats fire even when the pi process has been reaped due to
+// idle timeout.
+func (h *HeartbeatScheduler) scanSessionDir() []string {
+	hbPath := filepath.Join(h.piCfg.SessionDir, "HEARTBEAT.md")
+	if _, err := os.Stat(hbPath); err != nil {
 		return nil
 	}
 
-	var rooms []string
+	roomIDPath := filepath.Join(h.piCfg.SessionDir, ".room_id")
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		dir := filepath.Join(h.piCfg.SessionDir, entry.Name())
-
-		// Check if HEARTBEAT.md exists
-		hbPath := filepath.Join(dir, "HEARTBEAT.md")
-		if _, statErr := os.Stat(hbPath); statErr != nil {
-			continue
-		}
-
-		// Read the original room ID written by StartPi
-		roomIDPath := filepath.Join(dir, ".room_id")
-
-		data, readErr := os.ReadFile(roomIDPath)
-		if readErr != nil {
-			continue
-		}
-
-		if roomID := strings.TrimSpace(string(data)); roomID != "" {
-			rooms = append(rooms, roomID)
-		}
+	data, err := os.ReadFile(roomIDPath)
+	if err != nil {
+		return nil
 	}
 
-	return rooms
+	if roomID := strings.TrimSpace(string(data)); roomID != "" {
+		return []string{roomID}
+	}
+
+	return nil
 }
 
 // tick performs a single heartbeat for a room.
 func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) {
-	sessionDir := filepath.Join(h.piCfg.SessionDir, sanitizeRoomID(roomID))
-	heartbeatPath := filepath.Join(sessionDir, "HEARTBEAT.md")
+	heartbeatPath := filepath.Join(h.piCfg.SessionDir, "HEARTBEAT.md")
 
 	heartbeatContent, err := os.ReadFile(heartbeatPath)
 	if err != nil && !os.IsNotExist(err) {

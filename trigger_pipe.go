@@ -72,7 +72,7 @@ func (t *TriggerPipeManager) StartRoom(ctx context.Context, roomID string) {
 		return
 	}
 
-	pipePath := TriggerPipePath(t.piCfg.SessionDir, roomID)
+	pipePath := TriggerPipePath(t.piCfg.SessionDir)
 
 	if err := ensureFIFO(pipePath); err != nil {
 		slog.Warn("trigger: failed to ensure FIFO", "room", roomID, "path", pipePath, "error", err)
@@ -96,36 +96,22 @@ func (t *TriggerPipeManager) StopRoom(roomID string) {
 	}
 }
 
-// syncReaders scans session directories for rooms and starts readers
-// for any that don't have one yet.
+// syncReaders checks the session directory for a room and starts a reader
+// if one doesn't exist yet.
 func (t *TriggerPipeManager) syncReaders(ctx context.Context) {
-	entries, err := os.ReadDir(t.piCfg.SessionDir)
+	roomIDPath := filepath.Join(t.piCfg.SessionDir, ".room_id")
+
+	data, err := os.ReadFile(roomIDPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("trigger: failed to read session directory", "path", t.piCfg.SessionDir, "error", err)
-		}
 		return
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		roomIDPath := filepath.Join(t.piCfg.SessionDir, entry.Name(), ".room_id")
-
-		data, readErr := os.ReadFile(roomIDPath)
-		if readErr != nil {
-			continue
-		}
-
-		roomID := strings.TrimSpace(string(data))
-		if roomID == "" {
-			continue
-		}
-
-		t.StartRoom(ctx, roomID)
+	roomID := strings.TrimSpace(string(data))
+	if roomID == "" {
+		return
 	}
+
+	t.StartRoom(ctx, roomID)
 }
 
 // stopAll cancels all reader goroutines.
@@ -213,9 +199,9 @@ func (t *TriggerPipeManager) processTrigger(ctx context.Context, roomID, content
 	t.sendReply(ctx, roomID, reply)
 }
 
-// TriggerPipePath returns the path to the trigger FIFO for a room.
-func TriggerPipePath(sessionDir, roomID string) string {
-	return filepath.Join(sessionDir, sanitizeRoomID(roomID), "trigger.pipe")
+// TriggerPipePath returns the path to the trigger FIFO.
+func TriggerPipePath(sessionDir string) string {
+	return filepath.Join(sessionDir, "trigger.pipe")
 }
 
 // ensureFIFO creates a named pipe at the given path if it doesn't exist.

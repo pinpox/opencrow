@@ -206,7 +206,7 @@ func loadSoul() string {
 	return defaultSoul
 }
 
-const defaultSoul = `You are OpenCrow, an AI assistant living in Matrix chat rooms.
+const defaultSoul = `You are OpenCrow, an AI assistant living in a Matrix chat room.
 
 Be genuinely helpful, not performatively helpful. Skip the filler words — just help.
 Have opinions. Be resourceful before asking. Earn trust through competence.
@@ -243,7 +243,8 @@ Do not infer or repeat old tasks from prior conversations.
 If nothing needs attention, reply with exactly: HEARTBEAT_OK`
 
 const defaultTriggerPrompt = `An external process sent a trigger message. Read the content below and act on it.
-If nothing needs attention, reply with exactly: HEARTBEAT_OK`
+You MUST fully process the trigger before deciding on a response. Only reply with
+exactly HEARTBEAT_OK if your processing rules explicitly tell you to ignore it.`
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

@@ -11,12 +11,13 @@ OpenCrow is a Matrix bot that bridges chat messages to
 [pi](https://github.com/badlogic/pi-mono), a coding agent with built-in tools,
 session persistence, auto-compaction, and multi-provider LLM support. Instead of
 reimplementing all of that in Go, OpenCrow spawns pi as a long-lived subprocess
-per room via its RPC protocol and acts as a thin bridge.
+via its RPC protocol and acts as a thin bridge. The bot operates in a single
+Matrix room at a time; session data persists across room changes.
 
 ```mermaid
 graph LR
     Room[Matrix Room] -->|message| Bot["Bot (Go)"]
-    Bot -->|RPC| Pi["pi process (per room)"]
+    Bot -->|RPC| Pi["pi process"]
     Pi -->|response| Bot
     Bot -->|reply| Room
 
@@ -30,9 +31,8 @@ graph LR
     Pi -->|real content| Bot
 ```
 
-Each room gets its own pi process with an isolated session directory. The Go bot
-receives Matrix messages, forwards them to the room's pi process, collects the
-response, and sends it back.
+The Go bot receives Matrix messages, forwards them to the pi process, collects
+the response, and sends it back.
 
 ## Bot commands
 
@@ -42,7 +42,7 @@ Send these as plain text messages in any room with the bot:
 |---|---|
 | `!restart` | Kill the current pi process and start fresh on the next message |
 | `!skills` | List the skills loaded for this bot instance |
-| `!rooms` | Show all rooms with active pi processes |
+| `!verify` | Set up cross-signing so the bot's device shows as verified |
 
 ## File handling
 
@@ -125,14 +125,13 @@ When using the NixOS module, the default skill path points to the packaged
 
 ## Heartbeat
 
-OpenCrow can periodically wake up and check a per-room `HEARTBEAT.md` task list,
-prompting the AI proactively if something needs attention. This is disabled by
-default.
+OpenCrow can periodically wake up and check `HEARTBEAT.md` in the session
+directory, prompting the AI proactively if something needs attention. This is
+disabled by default.
 
 Set `OPENCROW_HEARTBEAT_INTERVAL` to a Go duration (e.g. `30m`, `1h`) to enable
-it. Every minute the scheduler checks each room with a live pi process. If the
-interval has elapsed since the last heartbeat, it reads
-`<session-dir>/<room-id>/HEARTBEAT.md`. If the file is missing or contains only
+it. Every minute the scheduler checks whether the heartbeat interval has elapsed
+and reads `<session-dir>/HEARTBEAT.md`. If the file is missing or contains only
 empty headers and list items, the heartbeat is skipped (no API call). Otherwise
 the file contents are sent to pi with a prompt asking it to follow any tasks
 listed there. If pi responds with `HEARTBEAT_OK`, the response is suppressed.
@@ -144,20 +143,20 @@ the pi process is still reaped after the idle timeout.
 ### Trigger pipes
 
 External processes (cron jobs, mail watchers, webhooks) can wake the bot
-immediately by writing to a room's named pipe (FIFO):
+immediately by writing to the session directory's named pipe (FIFO):
 
 ```
-<session-dir>/<sanitized-room-id>/trigger.pipe
+<session-dir>/trigger.pipe
 ```
 
-Each room's `trigger.pipe` is created automatically when the session directory
+The `trigger.pipe` is created automatically when the session directory
 is set up. A dedicated goroutine reads from the pipe and delivers the content
 to pi immediately — no waiting for the heartbeat tick.
 
 Example:
 
 ```
-echo "New email from alice@example.com" > /var/lib/opencrow/sessions/roomid-matrix.org/trigger.pipe
+echo "New email from alice@example.com" > /var/lib/opencrow/sessions/trigger.pipe
 ```
 
 Each line written to the pipe is processed as a separate trigger.
@@ -166,5 +165,5 @@ Each line written to the pipe is processed as a separate trigger.
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENCROW_HEARTBEAT_INTERVAL` | _(empty, disabled)_ | How often to run heartbeats per room (Go duration) |
+| `OPENCROW_HEARTBEAT_INTERVAL` | _(empty, disabled)_ | How often to run heartbeats (Go duration) |
 | `OPENCROW_HEARTBEAT_PROMPT` | built-in | Custom prompt sent with the HEARTBEAT.md contents |

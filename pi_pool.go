@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -130,70 +129,6 @@ func (pool *PiPool) SkillsSummary() string {
 
 	for _, s := range skills {
 		sb.WriteString(fmt.Sprintf("- %s\n", filepath.Base(s)))
-	}
-
-	return sb.String()
-}
-
-// RoomsSummary returns a formatted list of all rooms with session directories,
-// indicating which ones have a live pi process.
-func (pool *PiPool) RoomsSummary() string {
-	entries, err := os.ReadDir(pool.cfg.SessionDir)
-	if err != nil {
-		return fmt.Sprintf("Failed to read session directory: %v", err)
-	}
-
-	pool.mu.Lock()
-	liveRooms := make(map[string]struct{}, len(pool.processes))
-	for roomID, p := range pool.processes {
-		if p.IsAlive() {
-			liveRooms[roomID] = struct{}{}
-		}
-	}
-	pool.mu.Unlock()
-
-	type roomInfo struct {
-		roomID string
-		live   bool
-	}
-
-	var rooms []roomInfo
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		roomIDPath := filepath.Join(pool.cfg.SessionDir, entry.Name(), ".room_id")
-
-		data, readErr := os.ReadFile(roomIDPath)
-		if readErr != nil {
-			continue
-		}
-
-		roomID := strings.TrimSpace(string(data))
-		if roomID == "" {
-			continue
-		}
-
-		_, live := liveRooms[roomID]
-		rooms = append(rooms, roomInfo{roomID: roomID, live: live})
-	}
-
-	if len(rooms) == 0 {
-		return "No active rooms."
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%d room(s):\n", len(rooms)))
-
-	for _, r := range rooms {
-		status := "idle"
-		if r.live {
-			status = "live"
-		}
-
-		sb.WriteString(fmt.Sprintf("- `%s` (%s)\n", r.roomID, status))
 	}
 
 	return sb.String()

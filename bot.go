@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/rs/zerolog"
@@ -35,6 +36,9 @@ type Bot struct {
 	userID        id.UserID
 	allowedUsers  map[string]struct{}
 	initialSynced atomic.Bool
+
+	roomMu     sync.Mutex
+	activeRoom string
 }
 
 // SetTriggerPipeManager sets the trigger pipe manager on the bot.
@@ -167,6 +171,40 @@ func (b *Bot) setupCrypto(ctx context.Context, cfg MatrixConfig) error {
 
 	slog.Info("e2ee initialized", "device_id", b.client.DeviceID)
 
+	if err := b.ensureCrossSigning(ctx); err != nil {
+		slog.Warn("cross-signing setup failed", "error", err)
+	}
+
+	return nil
+}
+
+// ensureCrossSigning checks if the bot's device is verified via cross-signing.
+// If not, it attempts to generate and upload cross-signing keys.
+// On homeservers that require browser approval (like matrix.org), the user
+// must first approve at the URL shown in the error, then run !verify again.
+func (b *Bot) ensureCrossSigning(ctx context.Context) error {
+	mach := b.cryptoHelper.Machine()
+
+	hasKeys, isVerified, err := mach.GetOwnVerificationStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("checking verification status: %w", err)
+	}
+
+	if hasKeys && isVerified {
+		slog.Info("device is already cross-signed")
+
+		return nil
+	}
+
+	slog.Info("setting up cross-signing", "has_keys", hasKeys, "is_verified", isVerified)
+
+	recoveryKey, err := mach.GenerateAndVerifyWithRecoveryKey(ctx)
+	if err != nil {
+		return fmt.Errorf("generating cross-signing keys: %w", err)
+	}
+
+	slog.Info("cross-signing setup complete, store this recovery key securely", "recovery_key", recoveryKey)
+
 	return nil
 }
 
@@ -201,12 +239,27 @@ func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 		}
 	}
 
+	b.roomMu.Lock()
+	if b.activeRoom != "" {
+		b.roomMu.Unlock()
+		slog.Info("ignoring invite, already active in a room", "active_room", b.activeRoom, "invited_room", evt.RoomID)
+
+		return
+	}
+	b.roomMu.Unlock()
+
 	slog.Info("accepting invite", "sender", evt.Sender, "room", evt.RoomID)
 
 	_, err := b.client.JoinRoomByID(ctx, evt.RoomID)
 	if err != nil {
 		slog.Error("failed to join room", "room", evt.RoomID, "error", err)
+
+		return
 	}
+
+	b.roomMu.Lock()
+	b.activeRoom = string(evt.RoomID)
+	b.roomMu.Unlock()
 }
 
 func (b *Bot) handleLeave(ctx context.Context, evt *event.Event, mem *event.MemberEventContent) {
@@ -242,23 +295,20 @@ func (b *Bot) handleLeave(ctx context.Context, evt *event.Event, mem *event.Memb
 	b.cleanupRoom(roomID)
 }
 
-// cleanupRoom kills the pi process and removes the session directory for a room.
+// cleanupRoom kills the pi process for a room. The session directory is
+// preserved so history carries over when a new room is joined.
 func (b *Bot) cleanupRoom(roomID string) {
+	b.roomMu.Lock()
+	if b.activeRoom == roomID {
+		b.activeRoom = ""
+	}
+	b.roomMu.Unlock()
+
 	if b.triggerMgr != nil {
 		b.triggerMgr.StopRoom(roomID)
 	}
 
 	b.pool.Remove(roomID)
-
-	sessionDir := filepath.Join(b.pool.cfg.SessionDir, sanitizeRoomID(roomID))
-
-	if err := os.RemoveAll(sessionDir); err != nil {
-		slog.Error("failed to remove session directory", "room", roomID, "path", sessionDir, "error", err)
-
-		return
-	}
-
-	slog.Info("removed session directory", "room", roomID, "path", sessionDir)
 }
 
 func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
@@ -289,6 +339,14 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	roomID := string(evt.RoomID)
+
+	b.roomMu.Lock()
+	if b.activeRoom == "" {
+		b.activeRoom = roomID
+		slog.Info("discovered active room from message", "room", roomID)
+	}
+	b.roomMu.Unlock()
+
 	text := msg.Body
 
 	slog.Info("received message", "room", roomID, "sender", evt.Sender, "type", msg.MsgType, "len", len(text))
@@ -324,8 +382,17 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		return
 	}
 
-	if text == "!rooms" {
-		b.sendReply(ctx, evt.RoomID, b.pool.RoomsSummary())
+	if text == "!verify" {
+		if err := b.ensureCrossSigning(ctx); err != nil {
+			b.sendReply(ctx, evt.RoomID, fmt.Sprintf(
+				"Cross-signing failed: %v\n\n"+
+					"If the homeserver requires browser approval, log in as the bot at:\n"+
+					"https://account.matrix.org/account/?action=org.matrix.cross_signing_reset\n\n"+
+					"Approve the reset, then run `!verify` again.",
+				err))
+		} else {
+			b.sendReply(ctx, evt.RoomID, "Cross-signing verified.")
+		}
 
 		return
 	}
@@ -389,8 +456,7 @@ func (b *Bot) downloadAttachment(ctx context.Context, msg *event.MessageEventCon
 		return "", fmt.Errorf("parsing mxc URL: %w", err)
 	}
 
-	sessionDir := filepath.Join(b.pool.cfg.SessionDir, sanitizeRoomID(roomID))
-	downloadDir := filepath.Join(sessionDir, "attachments")
+	downloadDir := filepath.Join(b.pool.cfg.SessionDir, "attachments")
 
 	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating attachments dir: %w", err)

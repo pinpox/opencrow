@@ -31,29 +31,28 @@ type PiProcess struct {
 
 // StartPi spawns a pi --mode rpc subprocess for the given room.
 func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, error) {
-	sessionDir := filepath.Join(cfg.SessionDir, sanitizeRoomID(roomID))
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating session dir: %w", err)
 	}
 
-	// Persist the original room ID so the heartbeat scanner can map directories back.
-	roomIDPath := filepath.Join(sessionDir, ".room_id")
+	// Persist the current room ID so the heartbeat scheduler can identify the room.
+	roomIDPath := filepath.Join(cfg.SessionDir, ".room_id")
 	if err := os.WriteFile(roomIDPath, []byte(roomID), 0o644); err != nil {
 		return nil, fmt.Errorf("writing room ID file: %w", err)
 	}
 
 	// Create the trigger FIFO so external processes can write to it immediately.
-	if err := ensureFIFO(TriggerPipePath(cfg.SessionDir, roomID)); err != nil {
+	if err := ensureFIFO(TriggerPipePath(cfg.SessionDir)); err != nil {
 		return nil, fmt.Errorf("creating trigger FIFO: %w", err)
 	}
 
-	args := buildPiArgs(cfg, sessionDir)
+	args := buildPiArgs(cfg, cfg.SessionDir)
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
 	cmd.Dir = cfg.WorkingDir
 	cmd.Env = os.Environ()
 
-	return startPiProcess(cmd, roomID, sessionDir)
+	return startPiProcess(cmd, roomID, cfg.SessionDir)
 }
 
 func startPiProcess(cmd *exec.Cmd, roomID, sessionDir string) (*PiProcess, error) {
@@ -406,12 +405,3 @@ func extractLastAssistantText(messagesRaw json.RawMessage) string {
 	return ""
 }
 
-// sanitizeRoomID converts a Matrix room ID into a filesystem-safe directory name.
-// e.g. "!abc123:matrix.org" -> "abc123-matrix.org".
-func sanitizeRoomID(roomID string) string {
-	s := strings.TrimPrefix(roomID, "!")
-	s = strings.ReplaceAll(s, ":", "-")
-	s = strings.ReplaceAll(s, "/", "-")
-
-	return s
-}
