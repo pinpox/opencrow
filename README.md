@@ -34,6 +34,14 @@ graph LR
 The Go bot receives Matrix messages, forwards them to the pi process, collects
 the response, and sends it back.
 
+> [!WARNING]
+> There is no whitelisting, permission system, or tool filtering. Trying to bolt
+> that onto LLM tool use is inherently futile — the model will find a way around
+> it. The only real protection is running OpenCrow in a containerized or sandboxed
+> environment. **Use a NixOS container, VM, or similar isolation.** The included
+> NixOS module does exactly that. Don't run it on a machine where you'd mind the
+> LLM running arbitrary commands.
+
 ## Bot commands
 
 Send these as plain text messages in any room with the bot:
@@ -56,15 +64,6 @@ file with its tools.
 tags, uploads each referenced file to Matrix, and delivers them as attachments.
 Multiple `<sendfile>` tags can appear in a single response. The default system
 prompt (and `SOUL.md`) includes instructions so pi knows about this convention.
-
-## No safety guarantees
-
-There is no whitelisting, permission system, or tool filtering. Trying to bolt
-that onto LLM tool use is inherently futile -- the model will find a way around
-it. The only real protection is running OpenCrow in a containerized or sandboxed
-environment. If you try this out, **do so in a NixOS container, VM, or similar
-isolation**. The included NixOS module does exactly that. Don't
-run it on a machine where you'd mind the LLM running arbitrary commands.
 
 ## Authentication
 
