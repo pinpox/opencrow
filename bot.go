@@ -418,8 +418,12 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	if reply == "" {
+		slog.Warn("pi returned empty response", "room", roomID)
+
 		reply = "(empty response)"
 	}
+
+	slog.Info("sending reply", "room", roomID, "len", len(reply))
 
 	// Extract <sendfile> tags and upload any referenced files
 	cleanReply, filePaths := extractSendFiles(reply)

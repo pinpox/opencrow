@@ -311,7 +311,12 @@ func (p *PiProcess) readUntilAgentEnd() (string, error) {
 
 		switch evt.Type {
 		case "agent_end":
-			return extractLastAssistantText(evt.Messages), nil
+			text := extractLastAssistantText(evt.Messages)
+			if text == "" {
+				slog.Warn("agent_end contained no assistant text", "room", p.roomID, "messages_len", len(evt.Messages))
+			}
+
+			return text, nil
 
 		case "extension_ui_request":
 			// Auto-cancel dialog requests
@@ -372,7 +377,8 @@ func extractLastAssistantText(messagesRaw json.RawMessage) string {
 		return ""
 	}
 
-	// Walk backwards to find the last assistant message
+	// Walk backwards through assistant messages to find one with text content.
+	// The last assistant message might be tool-use only (no text), so keep looking.
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role != "assistant" {
 			continue
@@ -381,14 +387,18 @@ func extractLastAssistantText(messagesRaw json.RawMessage) string {
 		// Content can be a string or array of content blocks
 		var text string
 		if err := json.Unmarshal(messages[i].Content, &text); err == nil {
-			return text
+			if text != "" {
+				return text
+			}
+
+			continue
 		}
 
 		var blocks []contentBlock
 		if err := json.Unmarshal(messages[i].Content, &blocks); err != nil {
 			slog.Warn("failed to parse assistant content blocks", "error", err)
 
-			return ""
+			continue
 		}
 
 		var parts []string
@@ -399,7 +409,9 @@ func extractLastAssistantText(messagesRaw json.RawMessage) string {
 			}
 		}
 
-		return strings.Join(parts, "\n")
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
 	}
 
 	return ""
