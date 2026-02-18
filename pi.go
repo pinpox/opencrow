@@ -309,6 +309,8 @@ func (p *PiProcess) readUntilAgentEnd() (string, error) {
 			continue
 		}
 
+		slog.Debug("pi rpc event", "room", p.roomID, "type", evt.Type)
+
 		switch evt.Type {
 		case "agent_end":
 			text := extractLastAssistantText(evt.Messages)

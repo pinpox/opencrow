@@ -5,12 +5,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: parseLogLevel(os.Getenv("OPENCROW_LOG_LEVEL")),
 	})))
 
 	os.Exit(run())
@@ -76,4 +77,17 @@ func run() int {
 	}
 
 	return 0
+}
+
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
