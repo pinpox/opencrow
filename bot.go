@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/dbutil"
@@ -400,6 +401,9 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 
 		return
 	}
+
+	b.client.UserTyping(ctx, evt.RoomID, true, 30*time.Second)
+	defer b.client.UserTyping(ctx, evt.RoomID, false, 0)
 
 	pi, err := b.pool.Get(ctx, roomID)
 	if err != nil {
