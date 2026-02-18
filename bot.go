@@ -338,6 +338,10 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		return
 	}
 
+	if err := b.client.MarkRead(ctx, evt.RoomID, evt.ID); err != nil {
+		slog.Warn("failed to send read receipt", "event_id", evt.ID, "error", err)
+	}
+
 	roomID := string(evt.RoomID)
 
 	b.roomMu.Lock()
