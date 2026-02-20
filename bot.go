@@ -75,6 +75,14 @@ func (b *Bot) SendToRoom(ctx context.Context, roomID string, text string) {
 	b.sendReply(ctx, id.RoomID(roomID), text)
 }
 
+func (b *Bot) SetTyping(ctx context.Context, roomID string, typing bool) {
+	timeout := 30 * time.Second
+	if !typing {
+		timeout = 0
+	}
+	b.client.UserTyping(ctx, id.RoomID(roomID), typing, timeout)
+}
+
 func (b *Bot) Run(ctx context.Context, matrixCfg MatrixConfig) error {
 	if err := b.setupCrypto(ctx, matrixCfg); err != nil {
 		return fmt.Errorf("setting up e2ee: %w", err)
@@ -426,9 +434,17 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	if reply == "" {
-		slog.Warn("pi returned empty response", "room", roomID)
+		slog.Warn("pi returned empty response, re-prompting for summary", "room", roomID)
 
-		reply = "(empty response)"
+		reply, err = pi.Prompt(ctx, "You just completed a task but your response contained no text for the user. Please briefly summarize what you did or respond to the user's message.")
+		if err != nil {
+			slog.Error("re-prompt after empty response failed", "room", roomID, "error", err)
+			reply = "(I completed some actions but failed to generate a summary.)"
+		}
+
+		if reply == "" {
+			reply = "(empty response)"
+		}
 	}
 
 	slog.Info("sending reply", "room", roomID, "len", len(reply))

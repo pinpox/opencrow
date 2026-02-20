@@ -44,7 +44,7 @@ func run() int {
 	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, bot.SendToRoom)
 	hb.Start(ctx)
 
-	triggerMgr := NewTriggerPipeManager(pool, cfg.Pi, defaultTriggerPrompt, bot.SendToRoom)
+	triggerMgr := NewTriggerPipeManager(pool, cfg.Pi, defaultTriggerPrompt, bot.SendToRoom, bot.SetTyping)
 	triggerMgr.Start(ctx)
 	bot.SetTriggerPipeManager(triggerMgr)
 

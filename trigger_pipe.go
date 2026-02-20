@@ -19,6 +19,7 @@ type TriggerPipeManager struct {
 	piCfg     PiConfig
 	prompt    string
 	sendReply func(ctx context.Context, roomID string, text string)
+	setTyping func(ctx context.Context, roomID string, typing bool)
 	mu        sync.Mutex
 	readers   map[string]context.CancelFunc
 }
@@ -29,12 +30,14 @@ func NewTriggerPipeManager(
 	piCfg PiConfig,
 	prompt string,
 	sendReply func(ctx context.Context, roomID string, text string),
+	setTyping func(ctx context.Context, roomID string, typing bool),
 ) *TriggerPipeManager {
 	return &TriggerPipeManager{
 		pool:      pool,
 		piCfg:     piCfg,
 		prompt:    prompt,
 		sendReply: sendReply,
+		setTyping: setTyping,
 		readers:   make(map[string]context.CancelFunc),
 	}
 }
@@ -171,6 +174,9 @@ func (t *TriggerPipeManager) readLoop(ctx context.Context, roomID, pipePath stri
 
 // processTrigger sends a trigger message to pi and delivers the reply.
 func (t *TriggerPipeManager) processTrigger(ctx context.Context, roomID, content string) {
+	t.setTyping(ctx, roomID, true)
+	defer t.setTyping(ctx, roomID, false)
+
 	pi, err := t.pool.Get(ctx, roomID)
 	if err != nil {
 		slog.Error("trigger: failed to get pi process", "room", roomID, "error", err)
