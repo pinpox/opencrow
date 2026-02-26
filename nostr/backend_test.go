@@ -429,6 +429,7 @@ func sendTestDM(t *testing.T, ctx context.Context, wsURL string, senderSK gonost
 	t.Helper()
 
 	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	defer pool.Close("test done")
 	kr := keyer.NewPlainKeySigner(senderSK)
 
 	_, toThem, err := nip17.PrepareMessage(ctx, content, nil, kr, recipientPK, nil)

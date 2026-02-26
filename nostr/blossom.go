@@ -11,8 +11,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -132,28 +135,60 @@ func downloadURL(ctx context.Context, rawURL, sessionBaseDir, conversationID str
 		return "", fmt.Errorf("download returned status %d", resp.StatusCode)
 	}
 
-	// Extract filename from URL
-	filename := filepath.Base(rawURL)
-	if filename == "" || filename == "." || filename == "/" {
-		filename = "attachment"
+	// Extract filename from URL, stripping query string and unsafe characters.
+	filename := "attachment"
+	if parsed, parseErr := url.Parse(rawURL); parseErr == nil {
+		filename = path.Base(parsed.Path)
 	}
+	filename = sanitizeFilename(filename)
 
 	downloadDir := filepath.Join(sessionBaseDir, "attachments")
 	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating attachments dir: %w", err)
 	}
 
-	destPath := filepath.Join(downloadDir, filename)
-
-	f, err := os.Create(destPath)
+	// Use os.CreateTemp for atomic unique file creation — avoids collisions
+	// from concurrent downloads of the same filename.
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	pattern := base + "_*" + ext
+	f, err := os.CreateTemp(downloadDir, pattern)
 	if err != nil {
 		return "", fmt.Errorf("creating file: %w", err)
 	}
 	defer f.Close()
+	destPath := f.Name()
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		return "", fmt.Errorf("writing file: %w", err)
 	}
 
 	return destPath, nil
+}
+
+// unsafeFilenameChars matches characters that are unsafe in filenames across
+// common filesystems (NTFS, ext4, HFS+, etc.).
+var unsafeFilenameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
+
+// sanitizeFilename removes filesystem-unsafe characters, trims the result,
+// caps length, and falls back to "attachment" if nothing useful remains.
+func sanitizeFilename(name string) string {
+	name = unsafeFilenameChars.ReplaceAllString(name, "_")
+	name = strings.TrimSpace(name)
+
+	// Cap at a reasonable length to avoid filesystem limits.
+	const maxLen = 200
+	if len(name) > maxLen {
+		ext := filepath.Ext(name)
+		base := strings.TrimSuffix(name, ext)
+		if len(base) > maxLen-len(ext) {
+			base = base[:maxLen-len(ext)]
+		}
+		name = base + ext
+	}
+
+	if name == "" || name == "." || name == "/" {
+		name = "attachment"
+	}
+	return name
 }
