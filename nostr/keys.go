@@ -30,7 +30,11 @@ func loadKeys(raw string) (Keys, error) {
 		if prefix != "nsec" {
 			return Keys{}, fmt.Errorf("expected nsec prefix, got %s", prefix)
 		}
-		sk = val.(gonostr.SecretKey)
+		var ok bool
+		sk, ok = val.(gonostr.SecretKey)
+		if !ok {
+			return Keys{}, fmt.Errorf("nsec decoded to unexpected type %T", val)
+		}
 	} else {
 		var err error
 		sk, err = gonostr.SecretKeyFromHex(raw)
