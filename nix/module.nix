@@ -20,6 +20,12 @@ in
       description = "The opencrow package to use.";
     };
 
+    piPackage = lib.mkOption {
+      type = lib.types.package;
+      description = "The pi coding agent package. Required — typically from llm-agents.nix or similar.";
+      example = lib.literalExpression "llm-agents.packages.\${system}.pi";
+    };
+
     environmentFiles = lib.mkOption {
       type = lib.types.listOf lib.types.path;
       default = [ ];
@@ -255,6 +261,7 @@ in
 
             path = [
               opencrowPkg
+              cfg.piPackage
               pkgs.bash
               pkgs.coreutils
             ]
