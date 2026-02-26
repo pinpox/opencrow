@@ -165,6 +165,7 @@ func (b *Backend) SendMessage(ctx context.Context, conversationID string, text s
 	if b.kr == nil {
 		// Pool not started yet — create a temporary keyer and pool
 		pool := gonostr.NewPool(gonostr.PoolOptions{})
+		defer pool.Close("temporary pool done")
 		kr := keyer.NewPlainKeySigner(b.keys.SK)
 		b.sendDM(ctx, kr, pool, recipientPK, text)
 		return
