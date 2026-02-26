@@ -7,12 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	gonostr "fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/nip19"
 )
 
 type Config struct {
-	Matrix    MatrixConfig
-	Pi        PiConfig
-	Heartbeat HeartbeatConfig
+	BackendType string // "matrix" or "nostr"
+	Matrix      MatrixConfig
+	Nostr       NostrConfig
+	Pi          PiConfig
+	Heartbeat   HeartbeatConfig
 }
 
 type HeartbeatConfig struct {
@@ -30,6 +35,14 @@ type MatrixConfig struct {
 	CryptoDBPath string
 }
 
+type NostrConfig struct {
+	PrivateKey     string              // hex secret key (resolved from file or env)
+	Relays         []string            // OPENCROW_NOSTR_RELAYS
+	BlossomServers []string            // OPENCROW_NOSTR_BLOSSOM_SERVERS
+	AllowedUsers   map[string]struct{} // OPENCROW_NOSTR_ALLOWED_USERS (hex pubkeys)
+	SessionBaseDir string              // shared with PiConfig.SessionDir
+}
+
 type PiConfig struct {
 	BinaryPath   string
 	SessionDir   string
@@ -42,6 +55,15 @@ type PiConfig struct {
 }
 
 func LoadConfig() (*Config, error) {
+	backendType := envOr("OPENCROW_BACKEND", "matrix")
+
+	switch backendType {
+	case "matrix", "nostr":
+		// valid
+	default:
+		return nil, fmt.Errorf("OPENCROW_BACKEND=%q is not supported (valid: matrix, nostr)", backendType)
+	}
+
 	idleTimeout, err := parseIdleTimeout()
 	if err != nil {
 		return nil, err
@@ -57,6 +79,7 @@ func LoadConfig() (*Config, error) {
 	}
 
 	cfg := &Config{
+		BackendType: backendType,
 		Matrix: MatrixConfig{
 			Homeserver:   os.Getenv("OPENCROW_MATRIX_HOMESERVER"),
 			UserID:       os.Getenv("OPENCROW_MATRIX_USER_ID"),
@@ -82,16 +105,24 @@ func LoadConfig() (*Config, error) {
 		},
 	}
 
-	if cfg.Matrix.Homeserver == "" {
-		return nil, errors.New("OPENCROW_MATRIX_HOMESERVER is required")
-	}
+	switch cfg.BackendType {
+	case "matrix":
+		if cfg.Matrix.Homeserver == "" {
+			return nil, errors.New("OPENCROW_MATRIX_HOMESERVER is required")
+		}
+		if cfg.Matrix.UserID == "" {
+			return nil, errors.New("OPENCROW_MATRIX_USER_ID is required")
+		}
+		if cfg.Matrix.AccessToken == "" {
+			return nil, errors.New("OPENCROW_MATRIX_ACCESS_TOKEN is required")
+		}
 
-	if cfg.Matrix.UserID == "" {
-		return nil, errors.New("OPENCROW_MATRIX_USER_ID is required")
-	}
-
-	if cfg.Matrix.AccessToken == "" {
-		return nil, errors.New("OPENCROW_MATRIX_ACCESS_TOKEN is required")
+	case "nostr":
+		nostrCfg, err := loadNostrConfig(cfg.Pi.SessionDir)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Nostr = nostrCfg
 	}
 
 	return cfg, nil
@@ -206,23 +237,12 @@ func loadSoul() string {
 	return defaultSoul
 }
 
-const defaultSoul = `You are OpenCrow, an AI assistant living in a Matrix chat room.
+const defaultSoul = `You are OpenCrow, an AI assistant communicating via a messaging platform.
 
 Be genuinely helpful, not performatively helpful. Skip the filler words — just help.
 Have opinions. Be resourceful before asking. Earn trust through competence.
 Be concise when needed, thorough when it matters. Not a corporate drone. Not a sycophant. Just good.
 When using tools, prefer standard Unix tools. Check output before proceeding. Break complex tasks into steps and execute them.
-
-## Sending files to the user
-
-You can send files back to the user in the Matrix chat. To do this, include a <sendfile> tag
-in your response with the absolute path to the file:
-
-<sendfile>/path/to/file.png</sendfile>
-
-The bot will upload the file and deliver it as an attachment. You can include multiple
-<sendfile> tags in a single response. The tags will be stripped from the text message.
-Use this whenever you create a file the user should receive (charts, images, PDFs, scripts, etc.).
 
 ## Reminders and scheduled tasks
 
@@ -245,6 +265,101 @@ If nothing needs attention, reply with exactly: HEARTBEAT_OK`
 const defaultTriggerPrompt = `An external process sent a trigger message. Read the content below and act on it.
 You MUST fully process the trigger before deciding on a response. Only reply with
 exactly HEARTBEAT_OK if your processing rules explicitly tell you to ignore it.`
+
+func loadNostrConfig(sessionBaseDir string) (NostrConfig, error) {
+	privateKey, err := loadNostrPrivateKey()
+	if err != nil {
+		return NostrConfig{}, err
+	}
+
+	relays := parseCommaSeparated(os.Getenv("OPENCROW_NOSTR_RELAYS"))
+	if len(relays) == 0 {
+		return NostrConfig{}, errors.New("OPENCROW_NOSTR_RELAYS is required (comma-separated relay URLs)")
+	}
+
+	allowedUsers, err := parseNostrAllowedUsers(os.Getenv("OPENCROW_NOSTR_ALLOWED_USERS"))
+	if err != nil {
+		return NostrConfig{}, err
+	}
+
+	return NostrConfig{
+		PrivateKey:     privateKey,
+		Relays:         relays,
+		BlossomServers: parseCommaSeparated(os.Getenv("OPENCROW_NOSTR_BLOSSOM_SERVERS")),
+		AllowedUsers:   allowedUsers,
+		SessionBaseDir: sessionBaseDir,
+	}, nil
+}
+
+func loadNostrPrivateKey() (string, error) {
+	var raw string
+
+	if path := os.Getenv("OPENCROW_NOSTR_PRIVATE_KEY_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("reading OPENCROW_NOSTR_PRIVATE_KEY_FILE: %w", err)
+		}
+		raw = strings.TrimSpace(string(data))
+	}
+
+	if raw == "" {
+		raw = os.Getenv("OPENCROW_NOSTR_PRIVATE_KEY")
+	}
+
+	if raw == "" {
+		return "", errors.New("OPENCROW_NOSTR_PRIVATE_KEY or OPENCROW_NOSTR_PRIVATE_KEY_FILE is required")
+	}
+
+	// Decode nsec if needed
+	if strings.HasPrefix(raw, "nsec") {
+		prefix, val, err := nip19.Decode(raw)
+		if err != nil {
+			return "", fmt.Errorf("decoding nsec: %w", err)
+		}
+		if prefix != "nsec" {
+			return "", fmt.Errorf("expected nsec prefix, got %s", prefix)
+		}
+		raw = val.(gonostr.SecretKey).Hex()
+	}
+
+	return raw, nil
+}
+
+func parseNostrAllowedUsers(s string) (map[string]struct{}, error) {
+	users := make(map[string]struct{})
+
+	for _, u := range parseCommaSeparated(s) {
+		if strings.HasPrefix(u, "npub") {
+			prefix, val, err := nip19.Decode(u)
+			if err != nil {
+				return nil, fmt.Errorf("decoding npub %q: %w", u, err)
+			}
+			if prefix != "npub" {
+				return nil, fmt.Errorf("expected npub prefix, got %s", prefix)
+			}
+			u = val.(gonostr.PubKey).Hex()
+		}
+		users[u] = struct{}{}
+	}
+
+	return users, nil
+}
+
+func parseCommaSeparated(s string) []string {
+	if s == "" {
+		return nil
+	}
+
+	var result []string
+	for part := range strings.SplitSeq(s, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+
+	return result
+}
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

@@ -1,0 +1,137 @@
+package main
+
+import (
+	"context"
+	"sync"
+	"testing"
+
+	"github.com/pinpox/opencrow/backend"
+)
+
+// mockBackend records calls for testing.
+type mockBackend struct {
+	mu                    sync.Mutex
+	sentMessages          []sentMessage
+	sentFiles             []sentFile
+	typingCalls           []typingCall
+	resetCalls            []string
+	systemPromptExtraText string
+}
+
+type sentMessage struct {
+	conversationID string
+	text           string
+}
+
+type sentFile struct {
+	conversationID string
+	filePath       string
+}
+
+type typingCall struct {
+	conversationID string
+	typing         bool
+}
+
+func (m *mockBackend) Run(_ context.Context) error { return nil }
+func (m *mockBackend) Stop()                       {}
+func (m *mockBackend) Close() error                { return nil }
+
+func (m *mockBackend) SendMessage(_ context.Context, conversationID string, text string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sentMessages = append(m.sentMessages, sentMessage{conversationID, text})
+}
+
+func (m *mockBackend) SendFile(_ context.Context, conversationID string, filePath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sentFiles = append(m.sentFiles, sentFile{conversationID, filePath})
+	return nil
+}
+
+func (m *mockBackend) SetTyping(_ context.Context, conversationID string, typing bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.typingCalls = append(m.typingCalls, typingCall{conversationID, typing})
+}
+
+func (m *mockBackend) ResetConversation(_ context.Context, conversationID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resetCalls = append(m.resetCalls, conversationID)
+}
+
+func (m *mockBackend) SystemPromptExtra() string {
+	return m.systemPromptExtraText
+}
+
+func TestApp_Restart(t *testing.T) {
+	mb := &mockBackend{}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil)
+
+	ctx := context.Background()
+	app.HandleMessage(ctx, backend.Message{
+		ConversationID: "!room1",
+		SenderID:       "@user:example.com",
+		Text:           "!restart",
+	})
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if len(mb.resetCalls) != 1 || mb.resetCalls[0] != "!room1" {
+		t.Errorf("ResetConversation calls = %v, want [!room1]", mb.resetCalls)
+	}
+
+	if len(mb.sentMessages) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+	}
+	if mb.sentMessages[0].conversationID != "!room1" {
+		t.Errorf("sent to %q, want %q", mb.sentMessages[0].conversationID, "!room1")
+	}
+}
+
+func TestApp_Skills(t *testing.T) {
+	mb := &mockBackend{}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil)
+
+	ctx := context.Background()
+	app.HandleMessage(ctx, backend.Message{
+		ConversationID: "!room1",
+		SenderID:       "@user:example.com",
+		Text:           "!skills",
+	})
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if len(mb.sentMessages) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+	}
+}
+
+func TestApp_SystemPrompt(t *testing.T) {
+	mb := &mockBackend{systemPromptExtraText: "You are in a Nostr DM."}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil)
+
+	got := app.systemPrompt("Base prompt")
+	want := "Base prompt\n\nYou are in a Nostr DM."
+	if got != want {
+		t.Errorf("systemPrompt = %q, want %q", got, want)
+	}
+}
+
+func TestApp_SystemPrompt_NoExtra(t *testing.T) {
+	mb := &mockBackend{}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil)
+
+	got := app.systemPrompt("Base prompt")
+	if got != "Base prompt" {
+		t.Errorf("systemPrompt = %q, want %q", got, "Base prompt")
+	}
+}

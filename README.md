@@ -1,5 +1,4 @@
 
-
 # OpenCrow
 
 A saner alternative to [OpenClaw](https://github.com/openclaw/openclaw).
@@ -7,19 +6,23 @@ A saner alternative to [OpenClaw](https://github.com/openclaw/openclaw).
   <img src="logo.png" width="200" alt="OpenCrow logo">
 </p>
 
-OpenCrow is a Matrix bot that bridges chat messages to
+OpenCrow is a messaging bot that bridges chat messages to
 [pi](https://github.com/badlogic/pi-mono), a coding agent with built-in tools,
 session persistence, auto-compaction, and multi-provider LLM support. Instead of
 reimplementing all of that in Go, OpenCrow spawns pi as a long-lived subprocess
-via its RPC protocol and acts as a thin bridge. The bot operates in a single
-Matrix room at a time; session data persists across room changes.
+via its RPC protocol and acts as a thin bridge. The bot operates with a single
+active conversation at a time; session data persists across restarts.
+
+OpenCrow supports multiple messaging backends:
+- **Matrix** — E2EE chat rooms via mautrix
+- **Nostr** — NIP-17 encrypted DMs via go-nostr
 
 ```mermaid
 graph LR
-    Room[Matrix Room] -->|message| Bot["Bot (Go)"]
-    Bot -->|RPC| Pi["pi process"]
-    Pi -->|response| Bot
-    Bot -->|reply| Room
+    Transport[Matrix / Nostr] -->|message| App["App (Go)"]
+    App -->|RPC| Pi["pi process"]
+    Pi -->|response| App
+    App -->|reply| Transport
 
     Skills["SKILL.md files"] -->|"--skill"| Pi
     HB["HEARTBEAT.md"] -->|read| Sched[HeartbeatScheduler]
@@ -28,11 +31,11 @@ graph LR
     TrigMgr -->|PromptNoTouch| Pi
     Sched -->|PromptNoTouch| Pi
     Pi -->|"HEARTBEAT_OK"| Suppress(suppress)
-    Pi -->|real content| Bot
+    Pi -->|real content| App
 ```
 
-The Go bot receives Matrix messages, forwards them to the pi process, collects
-the response, and sends it back.
+The Go bot receives messages from the configured backend, forwards them to the
+pi process, collects the response, and sends it back.
 
 > [!WARNING]
 > There is no whitelisting, permission system, or tool filtering. Trying to bolt
@@ -42,38 +45,71 @@ the response, and sends it back.
 > NixOS module does exactly that. Don't run it on a machine where you'd mind the
 > LLM running arbitrary commands.
 
+## Backend selection
+
+Set `OPENCROW_BACKEND` to choose the messaging backend. Defaults to `matrix`.
+
+| Value | Description |
+|---|---|
+| `matrix` | Matrix rooms via mautrix (default, backwards compatible) |
+| `nostr` | Nostr NIP-17 encrypted DMs |
+
 ## Bot commands
 
-Send these as plain text messages in any room with the bot:
+Send these as plain text messages in any conversation with the bot:
 
 | Command | Description |
 |---|---|
 | `!restart` | Kill the current pi process and start fresh on the next message |
 | `!skills` | List the skills loaded for this bot instance |
-| `!verify` | Set up cross-signing so the bot's device shows as verified |
+| `!verify` | (Matrix only) Set up cross-signing so the bot's device shows as verified |
 
 ## File handling
 
-**Receiving files** -- Users can send images, audio, video, and documents to the
-bot. Attachments are downloaded to the room's session directory under
-`attachments/` and the file path is passed to pi so it can read or process the
-file with its tools.
+**Receiving files** — Users can send images, audio, video, and documents to the
+bot. Attachments are downloaded to the session directory under `attachments/`
+and the file path is passed to pi so it can read or process the file with its
+tools. On Nostr, media URLs in DMs are automatically detected and downloaded.
 
-**Sending files back** -- Pi can send files to the user by including
+**Sending files back** — Pi can send files to the user by including
 `<sendfile>/absolute/path</sendfile>` tags in its response. The bot strips the
-tags, uploads each referenced file to Matrix, and delivers them as attachments.
-Multiple `<sendfile>` tags can appear in a single response. The default system
-prompt (and `SOUL.md`) includes instructions so pi knows about this convention.
+tags, uploads each referenced file (to Matrix via MXC, or to a Blossom server
+for Nostr), and delivers them as attachments. Multiple `<sendfile>` tags can
+appear in a single response.
+
+## Matrix configuration
+
+| Variable | Required | Description |
+|---|---|---|
+| `OPENCROW_MATRIX_HOMESERVER` | Yes | Matrix homeserver URL |
+| `OPENCROW_MATRIX_USER_ID` | Yes | Bot's Matrix user ID |
+| `OPENCROW_MATRIX_ACCESS_TOKEN` | Yes | Access token (via environment file) |
+| `OPENCROW_MATRIX_DEVICE_ID` | No | Device ID (auto-resolved if omitted) |
+| `OPENCROW_MATRIX_PICKLE_KEY` | No | Pickle key for crypto DB |
+| `OPENCROW_MATRIX_CRYPTO_DB` | No | Path to crypto SQLite DB |
+| `OPENCROW_ALLOWED_USERS` | No | Comma-separated Matrix user IDs allowed to interact |
+
+## Nostr configuration
+
+| Variable | Required | Description |
+|---|---|---|
+| `OPENCROW_NOSTR_RELAYS` | Yes | Comma-separated relay WebSocket URLs |
+| `OPENCROW_NOSTR_PRIVATE_KEY` | Yes* | Hex or nsec private key |
+| `OPENCROW_NOSTR_PRIVATE_KEY_FILE` | Yes* | Path to file containing the private key |
+| `OPENCROW_NOSTR_BLOSSOM_SERVERS` | No | Comma-separated Blossom server URLs for file uploads |
+| `OPENCROW_NOSTR_ALLOWED_USERS` | No | Comma-separated npubs or hex pubkeys |
+
+*Either `OPENCROW_NOSTR_PRIVATE_KEY` or `OPENCROW_NOSTR_PRIVATE_KEY_FILE` is required.
 
 ## Authentication
 
 Pi needs credentials for your LLM provider. There are two ways to set this up:
 
-**Option A: Environment variable** -- set `ANTHROPIC_API_KEY` (or the
+**Option A: Environment variable** — set `ANTHROPIC_API_KEY` (or the
 equivalent for your provider) in an environment file and pass it via the
 `environmentFile` option in the NixOS module.
 
-**Option B: OAuth (Claude Pro/Max)** -- pi supports OAuth against your Anthropic
+**Option B: OAuth (Claude Pro/Max)** — pi supports OAuth against your Anthropic
 account, so you can use your subscription instead of API credits. The initial
 login is interactive and needs a browser, but subsequent token refreshes happen
 automatically.
@@ -86,12 +122,12 @@ PI_CODING_AGENT_DIR=/var/lib/opencrow/pi-agent pi
 # Then run /login in pi and complete OAuth
 ```
 
-The refresh token persists across restarts -- you only need to do this once
+The refresh token persists across restarts — you only need to do this once
 (unless the token gets revoked).
 
 ## Skills
 
-Pi supports skills -- markdown files that extend the agent's capabilities by
+Pi supports skills — markdown files that extend the agent's capabilities by
 providing instructions and examples for specific tasks. Each skill is a directory
 containing a `SKILL.md` file with a YAML frontmatter (`name`, `description`) and
 the skill's instructions.
@@ -134,9 +170,9 @@ and reads `<session-dir>/HEARTBEAT.md`. If the file is missing or contains only
 empty headers and list items, the heartbeat is skipped (no API call). Otherwise
 the file contents are sent to pi with a prompt asking it to follow any tasks
 listed there. If pi responds with `HEARTBEAT_OK`, the response is suppressed.
-Anything else is delivered to the Matrix room.
+Anything else is delivered to the conversation.
 
-Heartbeat prompts do not reset the idle timer -- if no real user messages arrive,
+Heartbeat prompts do not reset the idle timer — if no real user messages arrive,
 the pi process is still reaped after the idle timeout.
 
 ### Trigger pipes

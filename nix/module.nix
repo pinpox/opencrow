@@ -11,7 +11,7 @@ let
 in
 {
   options.services.opencrow = {
-    enable = lib.mkEnableOption "OpenCrow Matrix bot";
+    enable = lib.mkEnableOption "OpenCrow messaging bot";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -26,7 +26,8 @@ in
         List of environment files containing secrets (on the host).
         Bind-mounted read-only into the container.
         Must define at minimum (across all files):
-        - OPENCROW_MATRIX_ACCESS_TOKEN
+        - For Matrix: OPENCROW_MATRIX_ACCESS_TOKEN
+        - For Nostr: OPENCROW_NOSTR_PRIVATE_KEY or OPENCROW_NOSTR_PRIVATE_KEY_FILE
         - ANTHROPIC_API_KEY (or the appropriate key for your provider)
       '';
     };
@@ -59,9 +60,19 @@ in
         freeformType = lib.types.attrsOf lib.types.str;
 
         options = {
+          OPENCROW_BACKEND = lib.mkOption {
+            type = lib.types.enum [
+              "matrix"
+              "nostr"
+            ];
+            default = "matrix";
+            description = "Messaging backend to use.";
+          };
+
           OPENCROW_MATRIX_HOMESERVER = lib.mkOption {
             type = lib.types.str;
-            description = "Matrix homeserver URL.";
+            default = "";
+            description = "Matrix homeserver URL. Required when backend is matrix.";
             example = "https://matrix.example.com";
           };
 
@@ -69,6 +80,32 @@ in
             type = lib.types.str;
             default = "";
             description = "Matrix device ID.";
+          };
+
+          OPENCROW_NOSTR_RELAYS = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Comma-separated Nostr relay WebSocket URLs. Required when backend is nostr.";
+            example = "wss://relay.damus.io,wss://nos.lol";
+          };
+
+          OPENCROW_NOSTR_PRIVATE_KEY_FILE = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Path to file containing Nostr private key (hex or nsec). Required when backend is nostr (unless key is in environment file).";
+          };
+
+          OPENCROW_NOSTR_BLOSSOM_SERVERS = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Comma-separated Blossom server URLs for file uploads.";
+            example = "https://blossom.nostr.build";
+          };
+
+          OPENCROW_NOSTR_ALLOWED_USERS = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Comma-separated npubs or hex pubkeys allowed to interact with the bot. Empty allows all.";
           };
 
           OPENCROW_PI_PROVIDER = lib.mkOption {
@@ -86,7 +123,7 @@ in
           OPENCROW_PI_SESSION_DIR = lib.mkOption {
             type = lib.types.str;
             default = "/var/lib/opencrow/sessions";
-            description = "Directory for pi session storage (per-room subdirectories).";
+            description = "Directory for pi session storage.";
           };
 
           OPENCROW_PI_IDLE_TIMEOUT = lib.mkOption {
@@ -149,6 +186,22 @@ in
 
   config = lib.mkIf cfg.enable {
 
+    assertions = [
+      {
+        assertion =
+          cfg.environment.OPENCROW_BACKEND != "nostr" || cfg.environment.OPENCROW_NOSTR_RELAYS != "";
+        message = "OPENCROW_NOSTR_RELAYS is required when OPENCROW_BACKEND is nostr.";
+      }
+      {
+        assertion =
+          cfg.environment.OPENCROW_BACKEND != "nostr"
+          || cfg.environment.OPENCROW_NOSTR_PRIVATE_KEY_FILE != ""
+          # Key may also be provided via environmentFiles
+          || (builtins.length cfg.environmentFiles) > 0;
+        message = "OPENCROW_NOSTR_PRIVATE_KEY_FILE or a private key in environmentFiles is required when OPENCROW_BACKEND is nostr.";
+      }
+    ];
+
     # State directory on host (bind-mounted into container)
     systemd.tmpfiles.rules = [
       "d /var/lib/opencrow 0750 root root -"
@@ -189,7 +242,7 @@ in
           system.stateVersion = "25.05";
 
           systemd.services.opencrow = {
-            description = "OpenCrow Matrix Bot";
+            description = "OpenCrow Messaging Bot";
             wantedBy = [ "multi-user.target" ];
             after = [ "network-online.target" ];
             wants = [ "network-online.target" ];

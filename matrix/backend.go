@@ -1,4 +1,5 @@
-package main
+// Package matrix implements the Backend interface for Matrix messaging.
+package matrix
 
 import (
 	"context"
@@ -11,12 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pinpox/opencrow/backend"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/dbutil"
 	"maunium.net/go/mautrix"
@@ -29,25 +30,38 @@ import (
 
 const maxMessageLen = 30000
 
-type Bot struct {
+// Config holds Matrix-specific configuration.
+type Config struct {
+	Homeserver     string
+	UserID         string
+	AccessToken    string
+	DeviceID       string
+	AllowedUsers   map[string]struct{}
+	PickleKey      string
+	CryptoDBPath   string
+	SessionBaseDir string // base dir for per-conversation session subdirs
+}
+
+// Backend implements backend.Backend for Matrix.
+type Backend struct {
 	client        *mautrix.Client
 	cryptoHelper  *cryptohelper.CryptoHelper
-	pool          *PiPool
-	triggerMgr    *TriggerPipeManager
+	handler       backend.MessageHandler
+	cfg           Config
 	userID        id.UserID
 	allowedUsers  map[string]struct{}
 	initialSynced atomic.Bool
 
 	roomMu     sync.Mutex
 	activeRoom string
+
+	// onRoomCleanup is called when a room is cleaned up (leave/ban).
+	// Wired by the caller to kill pi processes and stop trigger pipes.
+	onRoomCleanup func(roomID string)
 }
 
-// SetTriggerPipeManager sets the trigger pipe manager on the bot.
-func (b *Bot) SetTriggerPipeManager(mgr *TriggerPipeManager) {
-	b.triggerMgr = mgr
-}
-
-func NewBot(cfg MatrixConfig, pool *PiPool) (*Bot, error) {
+// New creates a new Matrix backend.
+func New(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 	client, err := mautrix.NewClient(cfg.Homeserver, id.UserID(cfg.UserID), cfg.AccessToken)
 	if err != nil {
 		return nil, fmt.Errorf("creating matrix client: %w", err)
@@ -61,30 +75,23 @@ func NewBot(cfg MatrixConfig, pool *PiPool) (*Bot, error) {
 		w.Out = os.Stderr
 	})).With().Timestamp().Logger().Level(zerolog.InfoLevel)
 
-	return &Bot{
+	return &Backend{
 		client:       client,
-		pool:         pool,
+		handler:      handler,
+		cfg:          cfg,
 		userID:       id.UserID(cfg.UserID),
 		allowedUsers: cfg.AllowedUsers,
 	}, nil
 }
 
-// SendToRoom sends a text message to a Matrix room by string room ID.
-// Used as a callback for the heartbeat scheduler.
-func (b *Bot) SendToRoom(ctx context.Context, roomID string, text string) {
-	b.sendReply(ctx, id.RoomID(roomID), text)
+// SetRoomCleanupCallback sets the callback invoked when a room is cleaned up.
+func (b *Backend) SetRoomCleanupCallback(fn func(roomID string)) {
+	b.onRoomCleanup = fn
 }
 
-func (b *Bot) SetTyping(ctx context.Context, roomID string, typing bool) {
-	timeout := 30 * time.Second
-	if !typing {
-		timeout = 0
-	}
-	b.client.UserTyping(ctx, id.RoomID(roomID), typing, timeout)
-}
-
-func (b *Bot) Run(ctx context.Context, matrixCfg MatrixConfig) error {
-	if err := b.setupCrypto(ctx, matrixCfg); err != nil {
+// Run starts the Matrix sync loop (blocking).
+func (b *Backend) Run(ctx context.Context) error {
+	if err := b.setupCrypto(ctx); err != nil {
 		return fmt.Errorf("setting up e2ee: %w", err)
 	}
 
@@ -105,9 +112,7 @@ func (b *Bot) Run(ctx context.Context, matrixCfg MatrixConfig) error {
 		if since != "" {
 			b.initialSynced.Store(true)
 		}
-
 		slog.Debug("sync", "since", since, "joined_rooms", len(resp.Rooms.Join), "invited_rooms", len(resp.Rooms.Invite))
-
 		return true
 	})
 
@@ -120,37 +125,154 @@ func (b *Bot) Run(ctx context.Context, matrixCfg MatrixConfig) error {
 	return nil
 }
 
-func (b *Bot) Stop() {
+// Stop signals the Matrix sync to stop.
+func (b *Backend) Stop() {
 	b.client.StopSync()
 }
 
-func (b *Bot) Close() error {
+// Close releases crypto resources.
+func (b *Backend) Close() error {
 	if b.cryptoHelper != nil {
 		return fmt.Errorf("closing crypto helper: %w", b.cryptoHelper.Close())
 	}
-
 	return nil
 }
 
-func (b *Bot) setupCrypto(ctx context.Context, cfg MatrixConfig) error {
-	// Resolve device ID from server if not configured
+// SendMessage sends a text message to a Matrix room. Fire-and-forget.
+func (b *Backend) SendMessage(ctx context.Context, conversationID string, text string) {
+	roomID := id.RoomID(conversationID)
+
+	for len(text) > 0 {
+		chunk := text
+		if len(chunk) > maxMessageLen {
+			cutoff := maxMessageLen
+			if idx := lastNewline(chunk[:cutoff]); idx > 0 {
+				cutoff = idx + 1
+			}
+			chunk = text[:cutoff]
+			text = text[cutoff:]
+		} else {
+			text = ""
+		}
+
+		content := format.RenderMarkdown(chunk, true, false)
+		_, err := b.client.SendMessageEvent(ctx, roomID, event.EventMessage, &content)
+		if err != nil {
+			slog.Error("failed to send message", "room", roomID, "error", err)
+			return
+		}
+	}
+}
+
+// SendFile uploads and sends a file to a Matrix room.
+func (b *Backend) SendFile(ctx context.Context, conversationID string, filePath string) error {
+	roomID := id.RoomID(conversationID)
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("reading file: %w", err)
+	}
+
+	contentType := mime.TypeByExtension(filepath.Ext(filePath))
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+
+	resp, err := b.client.UploadMedia(ctx, mautrix.ReqUploadMedia{
+		ContentBytes: data,
+		ContentType:  contentType,
+		FileName:     filepath.Base(filePath),
+	})
+	if err != nil {
+		return fmt.Errorf("uploading media: %w", err)
+	}
+
+	msgType := event.MsgFile
+	switch {
+	case strings.HasPrefix(contentType, "image/"):
+		msgType = event.MsgImage
+	case strings.HasPrefix(contentType, "audio/"):
+		msgType = event.MsgAudio
+	case strings.HasPrefix(contentType, "video/"):
+		msgType = event.MsgVideo
+	}
+
+	content := &event.MessageEventContent{
+		MsgType:  msgType,
+		Body:     filepath.Base(filePath),
+		URL:      resp.ContentURI.CUString(),
+		FileName: filepath.Base(filePath),
+		Info: &event.FileInfo{
+			MimeType: contentType,
+			Size:     len(data),
+		},
+	}
+
+	_, err = b.client.SendMessageEvent(ctx, roomID, event.EventMessage, content)
+	if err != nil {
+		return fmt.Errorf("sending file message: %w", err)
+	}
+
+	slog.Info("sent file to room", "room", roomID, "path", filePath, "mime", contentType, "size", len(data))
+	return nil
+}
+
+// SetTyping sets the typing indicator for a Matrix room.
+func (b *Backend) SetTyping(ctx context.Context, conversationID string, typing bool) {
+	timeout := 30 * time.Second
+	if !typing {
+		timeout = 0
+	}
+	b.client.UserTyping(ctx, id.RoomID(conversationID), typing, timeout)
+}
+
+// ResetConversation clears the active room tracking.
+func (b *Backend) ResetConversation(_ context.Context, conversationID string) {
+	b.roomMu.Lock()
+	if b.activeRoom == conversationID {
+		b.activeRoom = ""
+	}
+	b.roomMu.Unlock()
+}
+
+// SystemPromptExtra returns Matrix-specific system prompt context.
+func (b *Backend) SystemPromptExtra() string {
+	return `You are living in a Matrix chat room.
+
+## Sending files to the user
+
+You can send files back to the user in the Matrix chat. To do this, include a <sendfile> tag
+in your response with the absolute path to the file:
+
+<sendfile>/path/to/file.png</sendfile>
+
+The bot will upload the file and deliver it as an attachment. You can include multiple
+<sendfile> tags in a single response. The tags will be stripped from the text message.
+Use this whenever you create a file the user should receive (charts, images, PDFs, scripts, etc.).
+
+## File attachments from the user
+
+When users send files (images, documents, etc.) in the chat, they are downloaded to your
+session directory. You'll see them as "[User sent a file (<caption>): <path>]". Use the
+read tool to view them.`
+}
+
+// --- internal handlers ---
+
+func (b *Backend) setupCrypto(ctx context.Context) error {
 	if b.client.DeviceID == "" {
 		resp, err := b.client.Whoami(ctx)
 		if err != nil {
 			return fmt.Errorf("fetching device ID from server: %w", err)
 		}
-
 		if resp.DeviceID == "" {
 			return errors.New("server did not return a device ID; set OPENCROW_MATRIX_DEVICE_ID")
 		}
-
 		b.client.DeviceID = resp.DeviceID
-
 		slog.Info("resolved device ID from server", "device_id", resp.DeviceID)
 	}
 
-	// Open SQLite database with pure-Go driver
-	sqlDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_txlock=immediate&_pragma=foreign_keys(1)&_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)", cfg.CryptoDBPath))
+	sqlDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_txlock=immediate&_pragma=foreign_keys(1)&_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)", b.cfg.CryptoDBPath))
 	if err != nil {
 		return fmt.Errorf("opening crypto database: %w", err)
 	}
@@ -158,20 +280,17 @@ func (b *Bot) setupCrypto(ctx context.Context, cfg MatrixConfig) error {
 	db, err := dbutil.NewWithDB(sqlDB, "sqlite")
 	if err != nil {
 		sqlDB.Close()
-
 		return fmt.Errorf("wrapping crypto database: %w", err)
 	}
 
-	cryptoHelper, err := cryptohelper.NewCryptoHelper(b.client, []byte(cfg.PickleKey), db)
+	cryptoHelper, err := cryptohelper.NewCryptoHelper(b.client, []byte(b.cfg.PickleKey), db)
 	if err != nil {
 		db.Close()
-
 		return fmt.Errorf("creating crypto helper: %w", err)
 	}
 
 	if err := cryptoHelper.Init(ctx); err != nil {
 		db.Close()
-
 		return fmt.Errorf("initializing crypto: %w", err)
 	}
 
@@ -187,11 +306,7 @@ func (b *Bot) setupCrypto(ctx context.Context, cfg MatrixConfig) error {
 	return nil
 }
 
-// ensureCrossSigning checks if the bot's device is verified via cross-signing.
-// If not, it attempts to generate and upload cross-signing keys.
-// On homeservers that require browser approval (like matrix.org), the user
-// must first approve at the URL shown in the error, then run !verify again.
-func (b *Bot) ensureCrossSigning(ctx context.Context) error {
+func (b *Backend) ensureCrossSigning(ctx context.Context) error {
 	mach := b.cryptoHelper.Machine()
 
 	hasKeys, isVerified, err := mach.GetOwnVerificationStatus(ctx)
@@ -201,7 +316,6 @@ func (b *Bot) ensureCrossSigning(ctx context.Context) error {
 
 	if hasKeys && isVerified {
 		slog.Info("device is already cross-signed")
-
 		return nil
 	}
 
@@ -213,11 +327,10 @@ func (b *Bot) ensureCrossSigning(ctx context.Context) error {
 	}
 
 	slog.Info("cross-signing setup complete, store this recovery key securely", "recovery_key", recoveryKey)
-
 	return nil
 }
 
-func (b *Bot) handleMembership(ctx context.Context, evt *event.Event) {
+func (b *Backend) handleMembership(ctx context.Context, evt *event.Event) {
 	if !b.initialSynced.Load() {
 		return
 	}
@@ -235,7 +348,7 @@ func (b *Bot) handleMembership(ctx context.Context, evt *event.Event) {
 	}
 }
 
-func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
+func (b *Backend) handleInvite(ctx context.Context, evt *event.Event) {
 	if id.UserID(*evt.StateKey) != b.userID {
 		return
 	}
@@ -243,7 +356,6 @@ func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 	if len(b.allowedUsers) > 0 {
 		if _, ok := b.allowedUsers[string(evt.Sender)]; !ok {
 			slog.Info("ignoring invite from non-allowed user", "sender", evt.Sender, "room", evt.RoomID)
-
 			return
 		}
 	}
@@ -252,7 +364,6 @@ func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 	if b.activeRoom != "" {
 		b.roomMu.Unlock()
 		slog.Info("ignoring invite, already active in a room", "active_room", b.activeRoom, "invited_room", evt.RoomID)
-
 		return
 	}
 	b.roomMu.Unlock()
@@ -262,7 +373,6 @@ func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 	_, err := b.client.JoinRoomByID(ctx, evt.RoomID)
 	if err != nil {
 		slog.Error("failed to join room", "room", evt.RoomID, "error", err)
-
 		return
 	}
 
@@ -271,23 +381,19 @@ func (b *Bot) handleInvite(ctx context.Context, evt *event.Event) {
 	b.roomMu.Unlock()
 }
 
-func (b *Bot) handleLeave(ctx context.Context, evt *event.Event, mem *event.MemberEventContent) {
+func (b *Backend) handleLeave(ctx context.Context, evt *event.Event, mem *event.MemberEventContent) {
 	target := id.UserID(*evt.StateKey)
 	roomID := string(evt.RoomID)
 
-	// Bot itself was removed or banned
 	if target == b.userID {
 		slog.Info("bot removed from room, cleaning up", "room", roomID, "membership", mem.Membership)
 		b.cleanupRoom(roomID)
-
 		return
 	}
 
-	// Another user left — check if the bot is now alone
 	members, err := b.client.JoinedMembers(ctx, evt.RoomID)
 	if err != nil {
 		slog.Warn("failed to query room members", "room", roomID, "error", err)
-
 		return
 	}
 
@@ -304,23 +410,19 @@ func (b *Bot) handleLeave(ctx context.Context, evt *event.Event, mem *event.Memb
 	b.cleanupRoom(roomID)
 }
 
-// cleanupRoom kills the pi process for a room. The session directory is
-// preserved so history carries over when a new room is joined.
-func (b *Bot) cleanupRoom(roomID string) {
+func (b *Backend) cleanupRoom(roomID string) {
 	b.roomMu.Lock()
 	if b.activeRoom == roomID {
 		b.activeRoom = ""
 	}
 	b.roomMu.Unlock()
 
-	if b.triggerMgr != nil {
-		b.triggerMgr.StopRoom(roomID)
+	if b.onRoomCleanup != nil {
+		b.onRoomCleanup(roomID)
 	}
-
-	b.pool.Remove(roomID)
 }
 
-func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
+func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
 	if !b.initialSynced.Load() {
 		return
 	}
@@ -364,13 +466,18 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 
 	slog.Info("received message", "room", roomID, "sender", evt.Sender, "type", msg.MsgType, "len", len(text))
 
-	// For file/image/audio/video messages, download the attachment and rewrite the prompt
+	// Handle !verify (Matrix-specific) before reaching the handler
+	if text == "!verify" {
+		b.handleVerify(ctx, evt.RoomID)
+		return
+	}
+
+	// Download attachments for non-text messages
 	if msg.MsgType != event.MsgText {
 		filePath, err := b.downloadAttachment(ctx, msg, roomID)
 		if err != nil {
 			slog.Error("failed to download attachment", "room", roomID, "error", err)
-			b.sendReply(ctx, evt.RoomID, fmt.Sprintf("Failed to download attachment: %v", err))
-
+			b.SendMessage(ctx, roomID, fmt.Sprintf("Failed to download attachment: %v", err))
 			return
 		}
 
@@ -382,92 +489,27 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		text = fmt.Sprintf("[User sent a file (%s): %s]\nUse the read tool to view it.", caption, filePath)
 	}
 
-	if text == "!restart" {
-		b.pool.Remove(roomID)
-		b.sendReply(ctx, evt.RoomID, "Session restarted. Next message will use a fresh process.")
+	b.handler(ctx, backend.Message{
+		ConversationID: roomID,
+		SenderID:       string(evt.Sender),
+		Text:           text,
+	})
+}
 
-		return
-	}
-
-	if text == "!skills" {
-		b.sendReply(ctx, evt.RoomID, b.pool.SkillsSummary())
-
-		return
-	}
-
-	if text == "!verify" {
-		if err := b.ensureCrossSigning(ctx); err != nil {
-			b.sendReply(ctx, evt.RoomID, fmt.Sprintf(
-				"Cross-signing failed: %v\n\n"+
-					"If the homeserver requires browser approval, log in as the bot at:\n"+
-					"https://account.matrix.org/account/?action=org.matrix.cross_signing_reset\n\n"+
-					"Approve the reset, then run `!verify` again.",
-				err))
-		} else {
-			b.sendReply(ctx, evt.RoomID, "Cross-signing verified.")
-		}
-
-		return
-	}
-
-	b.client.UserTyping(ctx, evt.RoomID, true, 30*time.Second)
-	defer b.client.UserTyping(ctx, evt.RoomID, false, 0)
-
-	pi, err := b.pool.Get(ctx, roomID)
-	if err != nil {
-		slog.Error("failed to get pi process", "room", roomID, "error", err)
-		b.sendReply(ctx, evt.RoomID, fmt.Sprintf("Error starting AI backend: %v", err))
-
-		return
-	}
-
-	if b.triggerMgr != nil {
-		b.triggerMgr.StartRoom(ctx, roomID)
-	}
-
-	reply, err := pi.Prompt(ctx, text)
-	if err != nil {
-		slog.Error("pi prompt failed", "room", roomID, "error", err)
-		b.pool.Remove(roomID)
-
-		reply = fmt.Sprintf("Error: %v", err)
-	}
-
-	if reply == "" {
-		slog.Warn("pi returned empty response, re-prompting for summary", "room", roomID)
-
-		reply, err = pi.Prompt(ctx, "You just completed a task but your response contained no text for the user. Please briefly summarize what you did or respond to the user's message.")
-		if err != nil {
-			slog.Error("re-prompt after empty response failed", "room", roomID, "error", err)
-			reply = "(I completed some actions but failed to generate a summary.)"
-		}
-
-		if reply == "" {
-			reply = "(empty response)"
-		}
-	}
-
-	slog.Info("sending reply", "room", roomID, "len", len(reply))
-
-	// Extract <sendfile> tags and upload any referenced files
-	cleanReply, filePaths := extractSendFiles(reply)
-
-	for _, fp := range filePaths {
-		if err := b.sendFile(ctx, evt.RoomID, fp); err != nil {
-			slog.Error("failed to send file", "room", roomID, "path", fp, "error", err)
-			cleanReply += fmt.Sprintf("\n\n(failed to send file %s: %v)", filepath.Base(fp), err)
-		}
-	}
-
-	if cleanReply != "" {
-		b.sendReply(ctx, evt.RoomID, cleanReply)
+func (b *Backend) handleVerify(ctx context.Context, roomID id.RoomID) {
+	if err := b.ensureCrossSigning(ctx); err != nil {
+		b.SendMessage(ctx, string(roomID), fmt.Sprintf(
+			"Cross-signing failed: %v\n\n"+
+				"If the homeserver requires browser approval, log in as the bot at:\n"+
+				"https://account.matrix.org/account/?action=org.matrix.cross_signing_reset\n\n"+
+				"Approve the reset, then run `!verify` again.",
+			err))
+	} else {
+		b.SendMessage(ctx, string(roomID), "Cross-signing verified.")
 	}
 }
 
-// downloadAttachment downloads a Matrix media attachment to the session directory.
-// Handles both unencrypted (msg.URL) and encrypted (msg.File) media.
-// Returns the local file path.
-func (b *Bot) downloadAttachment(ctx context.Context, msg *event.MessageEventContent, roomID string) (string, error) {
+func (b *Backend) downloadAttachment(ctx context.Context, msg *event.MessageEventContent, roomID string) (string, error) {
 	var urlStr id.ContentURIString
 
 	encrypted := msg.File != nil && msg.File.URL != ""
@@ -484,8 +526,7 @@ func (b *Bot) downloadAttachment(ctx context.Context, msg *event.MessageEventCon
 		return "", fmt.Errorf("parsing mxc URL: %w", err)
 	}
 
-	downloadDir := filepath.Join(b.pool.cfg.SessionDir, "attachments")
-
+	downloadDir := filepath.Join(b.cfg.SessionBaseDir, "attachments")
 	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating attachments dir: %w", err)
 	}
@@ -494,12 +535,9 @@ func (b *Bot) downloadAttachment(ctx context.Context, msg *event.MessageEventCon
 	if filename == "" {
 		filename = msg.Body
 	}
-
 	if filename == "" {
 		filename = "image.png"
 	}
-
-	// Strip directory components to prevent path traversal
 	filename = filepath.Base(filename)
 
 	destPath := filepath.Join(downloadDir, filename)
@@ -541,113 +579,7 @@ func (b *Bot) downloadAttachment(ctx context.Context, msg *event.MessageEventCon
 	}
 
 	slog.Info("downloaded attachment", "room", roomID, "path", destPath, "encrypted", encrypted)
-
 	return destPath, nil
-}
-
-var sendFileRe = regexp.MustCompile(`<sendfile>\s*(.*?)\s*</sendfile>`)
-
-// extractSendFiles finds all <sendfile>/path</sendfile> tags in text,
-// returns the cleaned text with tags stripped and the list of file paths.
-func extractSendFiles(text string) (string, []string) {
-	matches := sendFileRe.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return text, nil
-	}
-
-	var paths []string
-	for _, m := range matches {
-		p := strings.TrimSpace(m[1])
-		if p != "" {
-			paths = append(paths, p)
-		}
-	}
-
-	cleaned := sendFileRe.ReplaceAllString(text, "")
-	cleaned = strings.TrimSpace(cleaned)
-
-	return cleaned, paths
-}
-
-// sendFile reads a file from disk, uploads it to Matrix, and sends it as an attachment message.
-func (b *Bot) sendFile(ctx context.Context, roomID id.RoomID, filePath string) error {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("reading file: %w", err)
-	}
-
-	// Detect MIME type: try extension first, fall back to content sniffing
-	contentType := mime.TypeByExtension(filepath.Ext(filePath))
-	if contentType == "" {
-		contentType = http.DetectContentType(data)
-	}
-
-	resp, err := b.client.UploadMedia(ctx, mautrix.ReqUploadMedia{
-		ContentBytes: data,
-		ContentType:  contentType,
-		FileName:     filepath.Base(filePath),
-	})
-	if err != nil {
-		return fmt.Errorf("uploading media: %w", err)
-	}
-
-	// Pick appropriate message type based on MIME category
-	msgType := event.MsgFile
-	switch {
-	case strings.HasPrefix(contentType, "image/"):
-		msgType = event.MsgImage
-	case strings.HasPrefix(contentType, "audio/"):
-		msgType = event.MsgAudio
-	case strings.HasPrefix(contentType, "video/"):
-		msgType = event.MsgVideo
-	}
-
-	content := &event.MessageEventContent{
-		MsgType:  msgType,
-		Body:     filepath.Base(filePath),
-		URL:      resp.ContentURI.CUString(),
-		FileName: filepath.Base(filePath),
-		Info: &event.FileInfo{
-			MimeType: contentType,
-			Size:     len(data),
-		},
-	}
-
-	_, err = b.client.SendMessageEvent(ctx, roomID, event.EventMessage, content)
-	if err != nil {
-		return fmt.Errorf("sending file message: %w", err)
-	}
-
-	slog.Info("sent file to room", "room", roomID, "path", filePath, "mime", contentType, "size", len(data))
-
-	return nil
-}
-
-func (b *Bot) sendReply(ctx context.Context, roomID id.RoomID, text string) {
-	for len(text) > 0 {
-		chunk := text
-		if len(chunk) > maxMessageLen {
-			cutoff := maxMessageLen
-
-			if idx := lastNewline(chunk[:cutoff]); idx > 0 {
-				cutoff = idx + 1
-			}
-
-			chunk = text[:cutoff]
-			text = text[cutoff:]
-		} else {
-			text = ""
-		}
-
-		content := format.RenderMarkdown(chunk, true, false)
-
-		_, err := b.client.SendMessageEvent(ctx, roomID, event.EventMessage, &content)
-		if err != nil {
-			slog.Error("failed to send message", "room", roomID, "error", err)
-
-			return
-		}
-	}
 }
 
 func lastNewline(s string) int {
@@ -656,6 +588,5 @@ func lastNewline(s string) int {
 			return i
 		}
 	}
-
 	return -1
 }

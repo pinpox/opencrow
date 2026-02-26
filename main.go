@@ -7,6 +7,10 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"github.com/pinpox/opencrow/backend"
+	"github.com/pinpox/opencrow/matrix"
+	nostrbackend "github.com/pinpox/opencrow/nostr"
 )
 
 func main() {
@@ -25,7 +29,7 @@ func run() int {
 		return 1
 	}
 
-	slog.Info("config loaded")
+	slog.Info("config loaded", "backend", cfg.BackendType)
 
 	pool := NewPiPool(cfg.Pi)
 
@@ -34,19 +38,47 @@ func run() int {
 
 	pool.StartIdleReaper(ctx)
 
-	bot, err := NewBot(cfg.Matrix, pool)
-	if err != nil {
-		slog.Error("failed to create bot", "error", err)
+	// The App needs the backend, but the backend needs the App's handler.
+	// Resolve this with a handler that forwards to the App once it's wired.
+	var app *App
+	handler := func(ctx context.Context, msg backend.Message) {
+		app.HandleMessage(ctx, msg)
+	}
 
+	var b backend.Backend
+
+	switch cfg.BackendType {
+	case "matrix":
+		b, err = createMatrixBackend(cfg, pool, handler)
+	case "nostr":
+		b = createNostrBackend(cfg, handler)
+	}
+
+	if err != nil {
+		slog.Error("failed to create backend", "error", err)
 		return 1
 	}
 
-	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, bot.SendToRoom)
+	app = NewApp(b, pool, nil)
+
+	// Update system prompt with backend-specific context
+	cfg.Pi.SystemPrompt = app.systemPrompt(cfg.Pi.SystemPrompt)
+
+	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, func(ctx context.Context, roomID string, text string) {
+		b.SendMessage(ctx, roomID, text)
+	})
 	hb.Start(ctx)
 
-	triggerMgr := NewTriggerPipeManager(pool, cfg.Pi, defaultTriggerPrompt, bot.SendToRoom, bot.SetTyping)
+	triggerMgr := NewTriggerPipeManager(pool, cfg.Pi, defaultTriggerPrompt,
+		func(ctx context.Context, roomID string, text string) {
+			b.SendMessage(ctx, roomID, text)
+		},
+		func(ctx context.Context, roomID string, typing bool) {
+			b.SetTyping(ctx, roomID, typing)
+		},
+	)
 	triggerMgr.Start(ctx)
-	bot.SetTriggerPipeManager(triggerMgr)
+	app.triggerMgr = triggerMgr
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -55,28 +87,64 @@ func run() int {
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, shutting down", "signal", sig)
-		cancel()
+		b.Stop()
 		pool.StopAll()
-		bot.Stop()
+		cancel()
 	}()
 
 	slog.Info("opencrow starting")
 
-	if err := bot.Run(ctx, cfg.Matrix); err != nil {
+	if err := b.Run(ctx); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("shutdown complete")
 		} else {
-			slog.Error("bot exited with error", "error", err)
+			slog.Error("backend exited with error", "error", err)
 
 			return 1
 		}
 	}
 
-	if err := bot.Close(); err != nil {
-		slog.Error("failed to close bot", "error", err)
+	if err := b.Close(); err != nil {
+		slog.Error("failed to close backend", "error", err)
 	}
 
 	return 0
+}
+
+func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandler) (backend.Backend, error) {
+	matrixCfg := matrix.Config{
+		Homeserver:     cfg.Matrix.Homeserver,
+		UserID:         cfg.Matrix.UserID,
+		AccessToken:    cfg.Matrix.AccessToken,
+		DeviceID:       cfg.Matrix.DeviceID,
+		AllowedUsers:   cfg.Matrix.AllowedUsers,
+		PickleKey:      cfg.Matrix.PickleKey,
+		CryptoDBPath:   cfg.Matrix.CryptoDBPath,
+		SessionBaseDir: cfg.Pi.SessionDir,
+	}
+
+	b, err := matrix.New(matrixCfg, handler)
+	if err != nil {
+		return nil, err
+	}
+
+	b.SetRoomCleanupCallback(func(roomID string) {
+		pool.Remove(roomID)
+	})
+
+	return b, nil
+}
+
+func createNostrBackend(cfg *Config, handler backend.MessageHandler) backend.Backend {
+	nostrCfg := nostrbackend.Config{
+		PrivateKey:     cfg.Nostr.PrivateKey,
+		Relays:         cfg.Nostr.Relays,
+		BlossomServers: cfg.Nostr.BlossomServers,
+		AllowedUsers:   cfg.Nostr.AllowedUsers,
+		SessionBaseDir: cfg.Pi.SessionDir,
+	}
+
+	return nostrbackend.NewBackend(nostrCfg, handler)
 }
 
 func parseLogLevel(s string) slog.Level {
