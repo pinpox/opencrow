@@ -48,7 +48,7 @@ func TestSendFile_UploadsToBlossom(t *testing.T) {
 
 	// Create a test file
 	tmpFile := filepath.Join(t.TempDir(), "test.png")
-	if err := os.WriteFile(tmpFile, []byte("fake image data"), 0o644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte("fake image data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,7 +99,7 @@ func TestSendFile_BlossomFallback(t *testing.T) {
 	}
 
 	tmpFile := filepath.Join(t.TempDir(), "test.txt")
-	if err := os.WriteFile(tmpFile, []byte("data"), 0o644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte("data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,7 +218,7 @@ func TestSendFile_AllBlossomsFail(t *testing.T) {
 	}
 
 	tmpFile := filepath.Join(t.TempDir(), "test.txt")
-	if err := os.WriteFile(tmpFile, []byte("data"), 0o644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte("data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

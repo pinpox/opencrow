@@ -11,6 +11,7 @@ buildGoModule {
       ./../go.mod
       ./../go.sum
       (lib.fileset.fileFilter (file: file.hasExt "go") ./..)
+      ./../.golangci.yml
       ./../skills
       ./../SOUL.md
     ];

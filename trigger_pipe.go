@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -221,7 +222,7 @@ func TriggerPipePath(sessionDir string) string {
 // If a non-FIFO file exists at the path, it is replaced.
 func ensureFIFO(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return fmt.Errorf("creating FIFO parent dir: %w", err)
 	}
 
 	info, err := os.Lstat(path)
@@ -232,13 +233,17 @@ func ensureFIFO(path string) error {
 		}
 		// Not a FIFO, remove it
 		if err := os.Remove(path); err != nil {
-			return err
+			return fmt.Errorf("removing non-FIFO at %s: %w", path, err)
 		}
 	} else if !os.IsNotExist(err) {
-		return err
+		return fmt.Errorf("checking FIFO at %s: %w", path, err)
 	}
 
-	return syscall.Mkfifo(path, 0o644)
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		return fmt.Errorf("creating FIFO at %s: %w", path, err)
+	}
+
+	return nil
 }
 
 func buildTriggerPrompt(basePrompt, content string) string {

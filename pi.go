@@ -37,7 +37,7 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, erro
 
 	// Persist the current room ID so the heartbeat scheduler can identify the room.
 	roomIDPath := filepath.Join(cfg.SessionDir, ".room_id")
-	if err := os.WriteFile(roomIDPath, []byte(roomID), 0o644); err != nil {
+	if err := os.WriteFile(roomIDPath, []byte(roomID), 0o600); err != nil {
 		return nil, fmt.Errorf("writing room ID file: %w", err)
 	}
 
@@ -302,33 +302,13 @@ func (p *PiProcess) readUntilAgentEnd() (string, error) {
 			continue
 		}
 
-		var evt rpcEvent
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			slog.Warn("malformed JSON from pi", "room", p.roomID, "error", err, "line", line)
-
-			continue
+		text, done, err := p.handleRPCLine(line)
+		if err != nil {
+			return "", err
 		}
 
-		slog.Debug("pi rpc event", "room", p.roomID, "type", evt.Type)
-
-		switch evt.Type {
-		case "agent_end":
-			text := extractLastAssistantText(evt.Messages)
-			if text == "" {
-				slog.Warn("agent_end contained no assistant text", "room", p.roomID, "messages_len", len(evt.Messages))
-			}
-
+		if done {
 			return text, nil
-
-		case "extension_ui_request":
-			// Auto-cancel dialog requests
-			p.autoRespondExtensionUI(evt)
-
-		case "response":
-			// Check for prompt rejection
-			if evt.Success != nil && !*evt.Success {
-				return "", fmt.Errorf("pi rejected command %q: %s", evt.Command, evt.Error)
-			}
 		}
 	}
 
@@ -337,6 +317,39 @@ func (p *PiProcess) readUntilAgentEnd() (string, error) {
 	}
 
 	return "", errors.New("pi process closed stdout (EOF)")
+}
+
+// handleRPCLine parses a single JSON line from pi's stdout and returns
+// (text, done, err). When done is true, the agent has finished.
+func (p *PiProcess) handleRPCLine(line string) (string, bool, error) {
+	var evt rpcEvent
+	if err := json.Unmarshal([]byte(line), &evt); err != nil {
+		slog.Warn("malformed JSON from pi", "room", p.roomID, "error", err, "line", line)
+
+		return "", false, nil
+	}
+
+	slog.Debug("pi rpc event", "room", p.roomID, "type", evt.Type)
+
+	switch evt.Type {
+	case "agent_end":
+		text := extractLastAssistantText(evt.Messages)
+		if text == "" {
+			slog.Warn("agent_end contained no assistant text", "room", p.roomID, "messages_len", len(evt.Messages))
+		}
+
+		return text, true, nil
+
+	case "extension_ui_request":
+		p.autoRespondExtensionUI(evt)
+
+	case "response":
+		if evt.Success != nil && !*evt.Success {
+			return "", false, fmt.Errorf("pi rejected command %q: %s", evt.Command, evt.Error)
+		}
+	}
+
+	return "", false, nil
 }
 
 // autoRespondExtensionUI sends a cancellation response for dialog-type extension UI requests.
@@ -379,42 +392,42 @@ func extractLastAssistantText(messagesRaw json.RawMessage) string {
 		return ""
 	}
 
-	// Walk backwards through assistant messages to find one with text content.
-	// The last assistant message might be tool-use only (no text), so keep looking.
+	// Walk backwards — the last assistant message might be tool-use only.
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role != "assistant" {
 			continue
 		}
 
-		// Content can be a string or array of content blocks
-		var text string
-		if err := json.Unmarshal(messages[i].Content, &text); err == nil {
-			if text != "" {
-				return text
-			}
-
-			continue
-		}
-
-		var blocks []contentBlock
-		if err := json.Unmarshal(messages[i].Content, &blocks); err != nil {
-			slog.Warn("failed to parse assistant content blocks", "error", err)
-
-			continue
-		}
-
-		var parts []string
-
-		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		}
-
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
+		if text := parseAssistantContent(messages[i].Content); text != "" {
+			return text
 		}
 	}
 
 	return ""
+}
+
+// parseAssistantContent extracts text from an assistant message's content,
+// which can be either a plain string or an array of content blocks.
+func parseAssistantContent(raw json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+
+	var blocks []contentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		slog.Warn("failed to parse assistant content blocks", "error", err)
+
+		return ""
+	}
+
+	var parts []string
+
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+
+	return strings.Join(parts, "\n")
 }

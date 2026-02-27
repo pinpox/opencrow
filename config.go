@@ -12,8 +12,13 @@ import (
 	"fiatjaf.com/nostr/nip19"
 )
 
+const (
+	backendMatrix = "matrix"
+	backendNostr  = "nostr"
+)
+
 type Config struct {
-	BackendType string // "matrix" or "nostr"
+	BackendType string // backendMatrix or backendNostr
 	Matrix      MatrixConfig
 	Nostr       NostrConfig
 	Pi          PiConfig
@@ -63,10 +68,10 @@ func LoadConfig() (*Config, error) {
 // allowing tests to supply isolated environments without mutating os state.
 func loadConfig(getenv func(string) string) (*Config, error) {
 	env := envReader{getenv: getenv}
-	backendType := env.or("OPENCROW_BACKEND", "matrix")
+	backendType := env.or("OPENCROW_BACKEND", backendMatrix)
 
 	switch backendType {
-	case "matrix", "nostr":
+	case backendMatrix, backendNostr:
 		// valid
 	default:
 		return nil, fmt.Errorf("OPENCROW_BACKEND=%q is not supported (valid: matrix, nostr)", backendType)
@@ -113,30 +118,43 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 		},
 	}
 
+	if err := cfg.validateBackend(getenv); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+func (cfg *Config) validateBackend(getenv func(string) string) error {
 	switch cfg.BackendType {
-	case "matrix":
-		if cfg.Matrix.Homeserver == "" {
-			return nil, errors.New("OPENCROW_MATRIX_HOMESERVER is required")
-		}
-
-		if cfg.Matrix.UserID == "" {
-			return nil, errors.New("OPENCROW_MATRIX_USER_ID is required")
-		}
-
-		if cfg.Matrix.AccessToken == "" {
-			return nil, errors.New("OPENCROW_MATRIX_ACCESS_TOKEN is required")
-		}
-
-	case "nostr":
+	case backendMatrix:
+		return cfg.Matrix.validate()
+	case backendNostr:
 		nostrCfg, err := loadNostrConfig(getenv, cfg.Pi.SessionDir)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		cfg.Nostr = nostrCfg
 	}
 
-	return cfg, nil
+	return nil
+}
+
+func (m MatrixConfig) validate() error {
+	if m.Homeserver == "" {
+		return errors.New("OPENCROW_MATRIX_HOMESERVER is required")
+	}
+
+	if m.UserID == "" {
+		return errors.New("OPENCROW_MATRIX_USER_ID is required")
+	}
+
+	if m.AccessToken == "" {
+		return errors.New("OPENCROW_MATRIX_ACCESS_TOKEN is required")
+	}
+
+	return nil
 }
 
 // envReader wraps a getenv function with a fallback helper.

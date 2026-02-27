@@ -25,7 +25,7 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
 	"maunium.net/go/mautrix/id"
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // register sqlite driver for database/sql
 )
 
 const maxMessageLen = 30000
@@ -448,31 +448,8 @@ func (b *Backend) cleanupRoom(roomID string) {
 }
 
 func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
-	if !b.initialSynced.Load() {
-		return
-	}
-
-	if evt.Sender == b.userID {
-		return
-	}
-
-	if len(b.allowedUsers) > 0 {
-		if _, ok := b.allowedUsers[string(evt.Sender)]; !ok {
-			return
-		}
-	}
-
-	msg := evt.Content.AsMessage()
+	msg := b.filterMessage(evt)
 	if msg == nil {
-		return
-	}
-
-	switch msg.MsgType {
-	case event.MsgText, event.MsgImage, event.MsgFile, event.MsgAudio, event.MsgVideo:
-		// supported
-	case event.MsgEmote, event.MsgNotice, event.MsgLocation, event.MsgVerificationRequest, event.MsgBeeperGallery:
-		return
-	default:
 		return
 	}
 
@@ -481,41 +458,23 @@ func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	roomID := string(evt.RoomID)
-
-	b.roomMu.Lock()
-	if b.activeRoom == "" {
-		b.activeRoom = roomID
-		slog.Info("discovered active room from message", "room", roomID)
-	}
-	b.roomMu.Unlock()
+	b.trackRoom(roomID)
 
 	text := msg.Body
 
 	slog.Info("received message", "room", roomID, "sender", evt.Sender, "type", msg.MsgType, "len", len(text))
 
-	// Handle !verify (Matrix-specific) before reaching the handler
 	if text == "!verify" {
 		b.handleVerify(ctx, evt.RoomID)
 
 		return
 	}
 
-	// Download attachments for non-text messages
 	if msg.MsgType != event.MsgText {
-		filePath, err := b.downloadAttachment(ctx, msg, roomID)
-		if err != nil {
-			slog.Error("failed to download attachment", "room", roomID, "error", err)
-			b.SendMessage(ctx, roomID, fmt.Sprintf("Failed to download attachment: %v", err))
-
+		text = b.handleAttachment(ctx, msg, roomID)
+		if text == "" {
 			return
 		}
-
-		caption := msg.Body
-		if caption == "" || caption == msg.FileName {
-			caption = "no caption"
-		}
-
-		text = fmt.Sprintf("[User sent a file (%s): %s]\nUse the read tool to view it.", caption, filePath)
 	}
 
 	b.handler(ctx, backend.Message{
@@ -523,6 +482,67 @@ func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
 		SenderID:       string(evt.Sender),
 		Text:           text,
 	})
+}
+
+// filterMessage checks whether the event should be processed and returns
+// the message content, or nil if the event should be dropped.
+func (b *Backend) filterMessage(evt *event.Event) *event.MessageEventContent {
+	if !b.initialSynced.Load() {
+		return nil
+	}
+
+	if evt.Sender == b.userID {
+		return nil
+	}
+
+	if len(b.allowedUsers) > 0 {
+		if _, ok := b.allowedUsers[string(evt.Sender)]; !ok {
+			return nil
+		}
+	}
+
+	msg := evt.Content.AsMessage()
+	if msg == nil {
+		return nil
+	}
+
+	switch msg.MsgType {
+	case event.MsgText, event.MsgImage, event.MsgFile, event.MsgAudio, event.MsgVideo:
+		return msg
+	case event.MsgEmote, event.MsgNotice, event.MsgLocation, event.MsgVerificationRequest, event.MsgBeeperGallery:
+		return nil
+	default:
+		return nil
+	}
+}
+
+// trackRoom sets the active room if not already set.
+func (b *Backend) trackRoom(roomID string) {
+	b.roomMu.Lock()
+	if b.activeRoom == "" {
+		b.activeRoom = roomID
+		slog.Info("discovered active room from message", "room", roomID)
+	}
+	b.roomMu.Unlock()
+}
+
+// handleAttachment downloads and formats an attachment message.
+// Returns the formatted text, or empty string on failure (error already reported).
+func (b *Backend) handleAttachment(ctx context.Context, msg *event.MessageEventContent, roomID string) string {
+	filePath, err := b.downloadAttachment(ctx, msg, roomID)
+	if err != nil {
+		slog.Error("failed to download attachment", "room", roomID, "error", err)
+		b.SendMessage(ctx, roomID, fmt.Sprintf("Failed to download attachment: %v", err))
+
+		return ""
+	}
+
+	caption := msg.Body
+	if caption == "" || caption == msg.FileName {
+		caption = "no caption"
+	}
+
+	return fmt.Sprintf("[User sent a file (%s): %s]\nUse the read tool to view it.", caption, filePath)
 }
 
 func (b *Backend) handleVerify(ctx context.Context, roomID id.RoomID) {

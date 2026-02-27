@@ -73,7 +73,7 @@ func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 // Run starts the Nostr event loop — subscribes to kind 1059 gift wraps.
 func (b *Backend) Run(ctx context.Context) error {
 	b.pool = gonostr.NewPool(gonostr.PoolOptions{
-		AuthRequiredHandler: func(ctx context.Context, evt *gonostr.Event) error {
+		AuthRequiredHandler: func(_ context.Context, evt *gonostr.Event) error {
 			return evt.Sign(b.keys.SK)
 		},
 	})
@@ -111,44 +111,11 @@ func (b *Backend) Run(ctx context.Context) error {
 		b.processGiftWrap(ctx, &evt)
 	}
 
-	return ctx.Err()
-}
-
-// pruneSeenLoop prunes stale entries from both dedup sets.
-func (b *Backend) pruneSeenLoop(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			b.pruneSeen()
-		}
-	}
-}
-
-func (b *Backend) pruneSeen() {
-	cutoff := time.Now().Add(-b.seenTTL)
-
-	b.seenMu.Lock()
-	for id, t := range b.seenGiftWrap {
-		if t.Before(cutoff) {
-			delete(b.seenGiftWrap, id)
-		}
-	}
-	b.seenMu.Unlock()
-
-	b.seenRumorsMu.Lock()
-	for id, t := range b.seenRumors {
-		if t.Before(cutoff) {
-			delete(b.seenRumors, id)
-		}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("nostr event loop: %w", err)
 	}
 
-	saveSeenRumors(b.cfg.SessionBaseDir, b.seenRumors)
-	b.seenRumorsMu.Unlock()
+	return nil
 }
 
 // Stop signals the backend to shut down.
@@ -190,32 +157,6 @@ func (b *Backend) SendMessage(ctx context.Context, conversationID string, text s
 	}
 
 	b.sendDM(ctx, b.kr, b.pool, recipientPK, text)
-}
-
-func (b *Backend) sendDM(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Pool, recipientPK gonostr.PubKey, text string) {
-	toUs, toThem, err := nip17.PrepareMessage(ctx, text, nil, kr, recipientPK, nil)
-	if err != nil {
-		slog.Error("nostr: failed to prepare DM", "recipient", recipientPK.Hex(), "error", err)
-
-		return
-	}
-
-	for _, relayURL := range b.cfg.Relays {
-		r, err := pool.EnsureRelay(relayURL)
-		if err != nil {
-			slog.Warn("nostr: failed to connect to relay", "relay", relayURL, "error", err)
-
-			continue
-		}
-
-		if err := r.Publish(ctx, toUs); err != nil {
-			slog.Warn("nostr: failed to publish toUs", "relay", relayURL, "error", err)
-		}
-
-		if err := r.Publish(ctx, toThem); err != nil {
-			slog.Warn("nostr: failed to publish toThem", "relay", relayURL, "error", err)
-		}
-	}
 }
 
 // SendFile uploads a file to Blossom and sends the URL as a DM.
@@ -263,29 +204,83 @@ You can include multiple <sendfile> tags in a single response.`
 	return extra
 }
 
+// --- unexported methods ---
+
+// pruneSeenLoop prunes stale entries from both dedup sets.
+func (b *Backend) pruneSeenLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.pruneSeen()
+		}
+	}
+}
+
+func (b *Backend) pruneSeen() {
+	cutoff := time.Now().Add(-b.seenTTL)
+
+	b.seenMu.Lock()
+	for id, t := range b.seenGiftWrap {
+		if t.Before(cutoff) {
+			delete(b.seenGiftWrap, id)
+		}
+	}
+	b.seenMu.Unlock()
+
+	b.seenRumorsMu.Lock()
+	for id, t := range b.seenRumors {
+		if t.Before(cutoff) {
+			delete(b.seenRumors, id)
+		}
+	}
+
+	saveSeenRumors(b.cfg.SessionBaseDir, b.seenRumors)
+	b.seenRumorsMu.Unlock()
+}
+
+func (b *Backend) sendDM(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Pool, recipientPK gonostr.PubKey, text string) {
+	toUs, toThem, err := nip17.PrepareMessage(ctx, text, nil, kr, recipientPK, nil)
+	if err != nil {
+		slog.Error("nostr: failed to prepare DM", "recipient", recipientPK.Hex(), "error", err)
+
+		return
+	}
+
+	for _, relayURL := range b.cfg.Relays {
+		r, err := pool.EnsureRelay(relayURL)
+		if err != nil {
+			slog.Warn("nostr: failed to connect to relay", "relay", relayURL, "error", err)
+
+			continue
+		}
+
+		if err := r.Publish(ctx, toUs); err != nil {
+			slog.Warn("nostr: failed to publish toUs", "relay", relayURL, "error", err)
+		}
+
+		if err := r.Publish(ctx, toThem); err != nil {
+			slog.Warn("nostr: failed to publish toThem", "relay", relayURL, "error", err)
+		}
+	}
+}
+
 // processGiftWrap unwraps a kind 1059 event and dispatches to the handler.
 func (b *Backend) processGiftWrap(ctx context.Context, evt *gonostr.Event) {
 	if evt == nil {
-		slog.Debug("nostr: processGiftWrap called with nil event")
-
 		return
 	}
 
 	slog.Debug("nostr: processing gift wrap", "event_id", evt.ID.Hex(), "event_kind", evt.Kind)
 
-	// Dedup by gift wrap event ID (in-memory, handles multi-relay duplicates)
-	b.seenMu.Lock()
-	if _, ok := b.seenGiftWrap[evt.ID]; ok {
-		b.seenMu.Unlock()
-		slog.Debug("nostr: dropping duplicate gift wrap", "event_id", evt.ID.Hex())
-
+	if !b.dedupGiftWrap(evt.ID) {
 		return
 	}
 
-	b.seenGiftWrap[evt.ID] = time.Now()
-	b.seenMu.Unlock()
-
-	// Unwrap: gift wrap → seal → rumor
 	rumor, err := nip59.GiftUnwrap(*evt,
 		func(otherpubkey gonostr.PubKey, ciphertext string) (string, error) {
 			return b.kr.Decrypt(ctx, ciphertext, otherpubkey)
@@ -297,69 +292,93 @@ func (b *Backend) processGiftWrap(ctx context.Context, evt *gonostr.Event) {
 		return
 	}
 
-	// Dedup by rumor ID (persisted, survives restarts)
-	rumorHex := rumor.ID.Hex()
-
-	b.seenRumorsMu.Lock()
-	if _, ok := b.seenRumors[rumorHex]; ok {
-		b.seenRumorsMu.Unlock()
-		slog.Debug("nostr: dropping already-processed rumor", "rumor_id", rumorHex, "event_id", evt.ID.Hex())
-
+	if !b.dedupRumor(rumor.ID.Hex(), evt.ID.Hex()) {
 		return
 	}
 
-	b.seenRumors[rumorHex] = time.Now()
-	saveSeenRumors(b.cfg.SessionBaseDir, b.seenRumors)
-	b.seenRumorsMu.Unlock()
-
-	senderPK := rumor.PubKey
-	if senderPK == b.keys.PK {
-		slog.Debug("nostr: dropping own message echo", "event_id", evt.ID.Hex())
-
+	senderHex := rumor.PubKey.Hex()
+	if rumor.PubKey == b.keys.PK || !b.isAllowed(senderHex) || !b.claimConversation(senderHex) {
 		return
 	}
-
-	senderHex := senderPK.Hex()
-
-	// Check allowed users
-	if len(b.cfg.AllowedUsers) > 0 {
-		if _, ok := b.cfg.AllowedUsers[senderHex]; !ok {
-			slog.Debug("nostr: dropping DM from non-allowed user", "sender", senderHex)
-
-			return
-		}
-	}
-
-	// Single active conversation
-	b.activeMu.Lock()
-	if b.activeConvID == "" {
-		b.activeConvID = senderHex
-		slog.Info("nostr: active conversation set", "pubkey", senderHex)
-	} else if b.activeConvID != senderHex {
-		b.activeMu.Unlock()
-		slog.Info("nostr: dropping DM, different active conversation", "active", b.activeConvID, "sender", senderHex)
-
-		return
-	}
-	b.activeMu.Unlock()
 
 	slog.Info("nostr: received DM", "sender", senderHex, "len", len(rumor.Content), "tags", len(rumor.Tags))
-	slog.Debug("nostr: received DM content", "sender", senderHex, "content", rumor.Content)
 
-	for _, tag := range rumor.Tags {
-		slog.Debug("nostr: received DM tag", "sender", senderHex, "tag", tag)
-	}
-
-	text := rumor.Content
-
-	// Detect and download media URLs
-	text = b.rewriteMediaURLs(ctx, text, senderHex)
+	text := b.rewriteMediaURLs(ctx, rumor.Content, senderHex)
 
 	b.handler(ctx, backend.Message{
 		ConversationID: senderHex,
 		SenderID:       senderHex,
 		Text:           text,
 	})
+}
+
+// dedupGiftWrap returns true if this gift wrap event has not been seen before.
+func (b *Backend) dedupGiftWrap(id gonostr.ID) bool {
+	b.seenMu.Lock()
+	defer b.seenMu.Unlock()
+
+	if _, ok := b.seenGiftWrap[id]; ok {
+		slog.Debug("nostr: dropping duplicate gift wrap", "event_id", id.Hex())
+
+		return false
+	}
+
+	b.seenGiftWrap[id] = time.Now()
+
+	return true
+}
+
+// dedupRumor returns true if this rumor has not been processed before.
+func (b *Backend) dedupRumor(rumorHex, evtHex string) bool {
+	b.seenRumorsMu.Lock()
+	defer b.seenRumorsMu.Unlock()
+
+	if _, ok := b.seenRumors[rumorHex]; ok {
+		slog.Debug("nostr: dropping already-processed rumor", "rumor_id", rumorHex, "event_id", evtHex)
+
+		return false
+	}
+
+	b.seenRumors[rumorHex] = time.Now()
+	saveSeenRumors(b.cfg.SessionBaseDir, b.seenRumors)
+
+	return true
+}
+
+// isAllowed checks whether the sender is in the allowed users set (or if the set is empty).
+func (b *Backend) isAllowed(senderHex string) bool {
+	if len(b.cfg.AllowedUsers) == 0 {
+		return true
+	}
+
+	_, ok := b.cfg.AllowedUsers[senderHex]
+	if !ok {
+		slog.Debug("nostr: dropping DM from non-allowed user", "sender", senderHex)
+	}
+
+	return ok
+}
+
+// claimConversation tries to set the active conversation to senderHex.
+// Returns false if a different conversation is already active.
+func (b *Backend) claimConversation(senderHex string) bool {
+	b.activeMu.Lock()
+	defer b.activeMu.Unlock()
+
+	if b.activeConvID == "" {
+		b.activeConvID = senderHex
+		slog.Info("nostr: active conversation set", "pubkey", senderHex)
+
+		return true
+	}
+
+	if b.activeConvID != senderHex {
+		slog.Info("nostr: dropping DM, different active conversation", "active", b.activeConvID, "sender", senderHex)
+
+		return false
+	}
+
+	return true
 }
 
 var mediaURLRe = regexp.MustCompile(`(?i)https?://\S+\.(?:png|jpg|jpeg|gif|webp|pdf|mp3|mp4|wav|ogg|svg|bmp|tiff|zip)(?:\?\S*)?`)

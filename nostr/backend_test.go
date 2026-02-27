@@ -20,11 +20,7 @@ func TestSendMessage_PublishesGiftWrap(t *testing.T) {
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
-	// Bot keys
 	botSK := gonostr.Generate()
-	botPK := botSK.Public()
-
-	// Recipient keys
 	recipientSK := gonostr.Generate()
 	recipientPK := recipientSK.Public()
 
@@ -33,60 +29,57 @@ func TestSendMessage_PublishesGiftWrap(t *testing.T) {
 
 	b := newTestBackend(t, botSK, []string{wsURL}, nil)
 
-	// Set up pool and keyer so SendMessage works without Run
 	pool := gonostr.NewPool(gonostr.PoolOptions{})
 	kr := keyer.NewPlainKeySigner(botSK)
 	b.pool = pool
 	b.kr = kr
 
-	// Send the message
 	b.SendMessage(ctx, recipientPK.Hex(), "hello from bot")
 
-	// Now query the relay for the gift wrap
 	events := pool.FetchMany(ctx, []string{wsURL}, gonostr.Filter{
 		Kinds: []gonostr.Kind{gonostr.KindGiftWrap},
 	}, gonostr.SubscriptionOptions{})
 
-	var found bool
+	recipientKr := keyer.NewPlainKeySigner(recipientSK)
+	rumor := findGiftWrapRumor(ctx, t, events, recipientKr)
+
+	if rumor.Kind != gonostr.KindDirectMessage {
+		t.Errorf("rumor kind = %d, want %d", rumor.Kind, gonostr.KindDirectMessage)
+	}
+
+	if rumor.Content != "hello from bot" {
+		t.Errorf("rumor content = %q, want %q", rumor.Content, "hello from bot")
+	}
+
+	if rumor.PubKey != botSK.Public() {
+		t.Errorf("rumor pubkey = %s, want %s", rumor.PubKey, botSK.Public())
+	}
+}
+
+// findGiftWrapRumor unwraps the first decryptable gift wrap from the event stream.
+func findGiftWrapRumor(ctx context.Context, t *testing.T, events <-chan gonostr.RelayEvent, kr gonostr.Keyer) gonostr.Event {
+	t.Helper()
 
 	for ie := range events {
-		evt := ie.Event
-		if evt.Kind != gonostr.KindGiftWrap {
+		if ie.Kind != gonostr.KindGiftWrap {
 			continue
 		}
 
-		recipientKr := keyer.NewPlainKeySigner(recipientSK)
-
-		rumor, err := nip59.GiftUnwrap(evt,
+		rumor, err := nip59.GiftUnwrap(ie.Event,
 			func(otherpubkey gonostr.PubKey, ciphertext string) (string, error) {
-				return recipientKr.Decrypt(ctx, ciphertext, otherpubkey)
+				return kr.Decrypt(ctx, ciphertext, otherpubkey)
 			},
 		)
 		if err != nil {
-			// This might be the "toUs" copy we can't decrypt — skip
 			continue
 		}
 
-		if rumor.Kind != gonostr.KindDirectMessage {
-			t.Errorf("rumor kind = %d, want %d", rumor.Kind, gonostr.KindDirectMessage)
-		}
-
-		if rumor.Content != "hello from bot" {
-			t.Errorf("rumor content = %q, want %q", rumor.Content, "hello from bot")
-		}
-
-		if rumor.PubKey != botPK {
-			t.Errorf("rumor pubkey = %s, want %s", rumor.PubKey, botPK)
-		}
-
-		found = true
-
-		break
+		return rumor
 	}
 
-	if !found {
-		t.Fatal("no gift wrap found on relay")
-	}
+	t.Fatal("no decryptable gift wrap found on relay")
+
+	return gonostr.Event{}
 }
 
 func TestRun_ReceivesDM(t *testing.T) {
@@ -96,69 +89,35 @@ func TestRun_ReceivesDM(t *testing.T) {
 	defer cleanup()
 
 	botSK := gonostr.Generate()
-
 	senderSK := gonostr.Generate()
-	senderPK := senderSK.Public()
 
-	var (
-		received []backend.Message
-		mu       sync.Mutex
-	)
-
-	handler := func(_ context.Context, msg backend.Message) {
-		mu.Lock()
-
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, handler)
+	c := &messageCollector{}
+	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, c.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	runErr := make(chan error, 1)
-
-	go func() { runErr <- b.Run(ctx) }()
+	runErr := runBackendAsync(ctx, b)
 
 	time.Sleep(300 * time.Millisecond)
 
 	sendTestDM(ctx, t, wsURL, senderSK, b.keys.PK, "hello bot")
-
-	deadline := time.After(3 * time.Second)
-
-	for {
-		mu.Lock()
-		n := len(received)
-		mu.Unlock()
-
-		if n > 0 {
-			break
-		}
-
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for handler to be called")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	waitForMessages(t, c, 1)
 
 	cancel()
 	<-runErr
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(received) != 1 {
-		t.Fatalf("received %d messages, want 1", len(received))
+	msgs := c.get()
+	if len(msgs) != 1 {
+		t.Fatalf("received %d messages, want 1", len(msgs))
 	}
 
-	if received[0].ConversationID != senderPK.Hex() {
-		t.Errorf("ConversationID = %q, want %q", received[0].ConversationID, senderPK.Hex())
+	if msgs[0].ConversationID != senderSK.Public().Hex() {
+		t.Errorf("ConversationID = %q, want %q", msgs[0].ConversationID, senderSK.Public().Hex())
 	}
 
-	if received[0].Text != "hello bot" {
-		t.Errorf("Text = %q, want %q", received[0].Text, "hello bot")
+	if msgs[0].Text != "hello bot" {
+		t.Errorf("Text = %q, want %q", msgs[0].Text, "hello bot")
 	}
 }
 
@@ -169,75 +128,37 @@ func TestRun_DropsDisallowedUser(t *testing.T) {
 	defer cleanup()
 
 	botSK := gonostr.Generate()
-
 	allowedSK := gonostr.Generate()
-	allowedPK := allowedSK.Public()
-
 	disallowedSK := gonostr.Generate()
 
-	var (
-		received []backend.Message
-		mu       sync.Mutex
-	)
-
-	handler := func(_ context.Context, msg backend.Message) {
-		mu.Lock()
-
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	allowedUsers := map[string]struct{}{allowedPK.Hex(): {}}
-	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, allowedUsers, handler)
+	c := &messageCollector{}
+	allowedUsers := map[string]struct{}{allowedSK.Public().Hex(): {}}
+	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, allowedUsers, c.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	runErr := make(chan error, 1)
-
-	go func() { runErr <- b.Run(ctx) }()
+	runErr := runBackendAsync(ctx, b)
 
 	time.Sleep(300 * time.Millisecond)
 
-	// Send from disallowed user first
 	sendTestDM(ctx, t, wsURL, disallowedSK, b.keys.PK, "should be dropped")
 	time.Sleep(200 * time.Millisecond)
 
-	// Then from allowed user
 	sendTestDM(ctx, t, wsURL, allowedSK, b.keys.PK, "should be received")
-
-	deadline := time.After(3 * time.Second)
-
-	for {
-		mu.Lock()
-		n := len(received)
-		mu.Unlock()
-
-		if n > 0 {
-			break
-		}
-
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for allowed message")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-
+	waitForMessages(t, c, 1)
 	time.Sleep(200 * time.Millisecond)
 
 	cancel()
 	<-runErr
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(received) != 1 {
-		t.Fatalf("received %d messages, want 1", len(received))
+	msgs := c.get()
+	if len(msgs) != 1 {
+		t.Fatalf("received %d messages, want 1", len(msgs))
 	}
 
-	if received[0].Text != "should be received" {
-		t.Errorf("Text = %q, want %q", received[0].Text, "should be received")
+	if msgs[0].Text != "should be received" {
+		t.Errorf("Text = %q, want %q", msgs[0].Text, "should be received")
 	}
 }
 
@@ -248,55 +169,35 @@ func TestSingleActiveConversation(t *testing.T) {
 	defer cleanup()
 
 	botSK := gonostr.Generate()
-
 	userASK := gonostr.Generate()
-	userAPK := userASK.Public()
-
 	userBSK := gonostr.Generate()
 
-	var (
-		received []backend.Message
-		mu       sync.Mutex
-	)
-
-	handler := func(_ context.Context, msg backend.Message) {
-		mu.Lock()
-
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, handler)
+	c := &messageCollector{}
+	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, c.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	runErr := make(chan error, 1)
-
-	go func() { runErr <- b.Run(ctx) }()
+	runErr := runBackendAsync(ctx, b)
 
 	time.Sleep(300 * time.Millisecond)
 
-	// A sends first — becomes active
 	sendTestDM(ctx, t, wsURL, userASK, b.keys.PK, "from A")
 	time.Sleep(300 * time.Millisecond)
 
-	// B sends — should be dropped
 	sendTestDM(ctx, t, wsURL, userBSK, b.keys.PK, "from B")
 	time.Sleep(300 * time.Millisecond)
 
 	cancel()
 	<-runErr
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(received) != 1 {
-		t.Fatalf("received %d messages, want 1", len(received))
+	msgs := c.get()
+	if len(msgs) != 1 {
+		t.Fatalf("received %d messages, want 1", len(msgs))
 	}
 
-	if received[0].ConversationID != userAPK.Hex() {
-		t.Errorf("ConversationID = %q, want %q", received[0].ConversationID, userAPK.Hex())
+	if msgs[0].ConversationID != userASK.Public().Hex() {
+		t.Errorf("ConversationID = %q, want %q", msgs[0].ConversationID, userASK.Public().Hex())
 	}
 }
 
@@ -307,77 +208,38 @@ func TestResetConversation(t *testing.T) {
 	defer cleanup()
 
 	botSK := gonostr.Generate()
-
 	userASK := gonostr.Generate()
-	userAPK := userASK.Public()
-
 	userBSK := gonostr.Generate()
-	userBPK := userBSK.Public()
 
-	var (
-		received []backend.Message
-		mu       sync.Mutex
-	)
-
-	handler := func(_ context.Context, msg backend.Message) {
-		mu.Lock()
-
-		received = append(received, msg)
-		mu.Unlock()
-	}
-
-	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, handler)
+	c := &messageCollector{}
+	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, c.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	runErr := make(chan error, 1)
-
-	go func() { runErr <- b.Run(ctx) }()
+	runErr := runBackendAsync(ctx, b)
 
 	time.Sleep(300 * time.Millisecond)
 
-	// A sends — becomes active
 	sendTestDM(ctx, t, wsURL, userASK, b.keys.PK, "from A")
-	time.Sleep(300 * time.Millisecond)
+	waitForMessages(t, c, 1)
 
-	// Reset A's conversation
-	b.ResetConversation(ctx, userAPK.Hex())
+	b.ResetConversation(ctx, userASK.Public().Hex())
 	time.Sleep(100 * time.Millisecond)
 
-	// B sends — should be accepted now
 	sendTestDM(ctx, t, wsURL, userBSK, b.keys.PK, "from B")
-
-	deadline := time.After(3 * time.Second)
-
-	for {
-		mu.Lock()
-		n := len(received)
-		mu.Unlock()
-
-		if n >= 2 {
-			break
-		}
-
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for second message")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	waitForMessages(t, c, 2)
 
 	cancel()
 	<-runErr
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(received) != 2 {
-		t.Fatalf("received %d messages, want 2", len(received))
+	msgs := c.get()
+	if len(msgs) != 2 {
+		t.Fatalf("received %d messages, want 2", len(msgs))
 	}
 
-	if received[1].ConversationID != userBPK.Hex() {
-		t.Errorf("second message ConversationID = %q, want %q", received[1].ConversationID, userBPK.Hex())
+	if msgs[1].ConversationID != userBSK.Public().Hex() {
+		t.Errorf("second message ConversationID = %q, want %q", msgs[1].ConversationID, userBSK.Public().Hex())
 	}
 }
 
@@ -391,24 +253,14 @@ func TestSeenRumorsPersistence(t *testing.T) {
 	senderSK := gonostr.Generate()
 	sessionDir := t.TempDir()
 
-	var (
-		mu       sync.Mutex
-		received []backend.Message
-	)
-
-	handler := func(_ context.Context, msg backend.Message) {
-		mu.Lock()
-
-		received = append(received, msg)
-		mu.Unlock()
-	}
+	c := &messageCollector{}
 
 	b, err := NewBackend(Config{
 		PrivateKey:     botSK.Hex(),
 		Relays:         []string{wsURL},
 		AllowedUsers:   make(map[string]struct{}),
 		SessionBaseDir: sessionDir,
-	}, handler)
+	}, c.handler)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,36 +268,16 @@ func TestSeenRumorsPersistence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	runErr := make(chan error, 1)
-
-	go func() { runErr <- b.Run(ctx) }()
+	runErr := runBackendAsync(ctx, b)
 
 	time.Sleep(300 * time.Millisecond)
 
 	sendTestDM(ctx, t, wsURL, senderSK, b.keys.PK, "first message")
-
-	deadline := time.After(3 * time.Second)
-
-	for {
-		mu.Lock()
-		n := len(received)
-		mu.Unlock()
-
-		if n > 0 {
-			break
-		}
-
-		select {
-		case <-deadline:
-			t.Fatal("timed out")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	waitForMessages(t, c, 1)
 
 	cancel()
 	<-runErr
 
-	// Verify seen rumors were persisted
 	seen := loadSeenRumors(sessionDir, 7*24*time.Hour)
 	if len(seen) == 0 {
 		t.Fatal("no seen rumors persisted to disk")
@@ -462,130 +294,122 @@ func TestRestartDropsStaleMessages(t *testing.T) {
 	senderSK := gonostr.Generate()
 	sessionDir := t.TempDir()
 
-	var (
-		mu       sync.Mutex
-		received []backend.Message
-	)
-
-	handler := func(_ context.Context, msg backend.Message) {
-		mu.Lock()
-
-		received = append(received, msg)
-		mu.Unlock()
-	}
+	c := &messageCollector{}
 
 	// --- First run: receive a message, persist seen rumor IDs ---
-	b1, err := NewBackend(Config{
-		PrivateKey:     botSK.Hex(),
-		Relays:         []string{wsURL},
-		AllowedUsers:   make(map[string]struct{}),
-		SessionBaseDir: sessionDir,
-	}, handler)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b1 := newTestBackendWithSessionDir(t, botSK, []string{wsURL}, sessionDir, c.handler)
 
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel1()
 
-	runErr1 := make(chan error, 1)
-
-	go func() { runErr1 <- b1.Run(ctx1) }()
+	runErr1 := runBackendAsync(ctx1, b1)
 
 	time.Sleep(300 * time.Millisecond)
 
 	sendTestDM(ctx1, t, wsURL, senderSK, b1.keys.PK, "old message")
-
-	deadline := time.After(3 * time.Second)
-
-	for {
-		mu.Lock()
-		n := len(received)
-		mu.Unlock()
-
-		if n > 0 {
-			break
-		}
-
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for first message")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	waitForMessages(t, c, 1)
 
 	cancel1()
 	<-runErr1
 
-	mu.Lock()
-	if len(received) != 1 || received[0].Text != "old message" {
-		t.Fatalf("first run: got %d messages, want 1 with 'old message'", len(received))
+	msgs := c.get()
+	if len(msgs) != 1 || msgs[0].Text != "old message" {
+		t.Fatalf("first run: got %d messages, want 1 with 'old message'", len(msgs))
 	}
 
-	received = nil
-	mu.Unlock()
+	c.reset()
 
 	// --- Second run: same sessionDir, "old message" is still on the relay ---
-	// It must NOT be delivered again.
-	b2, err := NewBackend(Config{
-		PrivateKey:     botSK.Hex(),
-		Relays:         []string{wsURL},
-		AllowedUsers:   make(map[string]struct{}),
-		SessionBaseDir: sessionDir,
-	}, handler)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b2 := newTestBackendWithSessionDir(t, botSK, []string{wsURL}, sessionDir, c.handler)
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 
-	runErr2 := make(chan error, 1)
-
-	go func() { runErr2 <- b2.Run(ctx2) }()
+	runErr2 := runBackendAsync(ctx2, b2)
 
 	time.Sleep(300 * time.Millisecond)
 
-	// Send a new message — this one should be delivered
 	sendTestDM(ctx2, t, wsURL, senderSK, b2.keys.PK, "new message")
-
-	deadline = time.After(3 * time.Second)
-
-	for {
-		mu.Lock()
-		n := len(received)
-		mu.Unlock()
-
-		if n > 0 {
-			break
-		}
-
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for new message")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-
-	// Give extra time for any stale duplicates to arrive
+	waitForMessages(t, c, 1)
 	time.Sleep(500 * time.Millisecond)
 
 	cancel2()
 	<-runErr2
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(received) != 1 {
-		t.Fatalf("second run: got %d messages, want 1", len(received))
+	msgs = c.get()
+	if len(msgs) != 1 {
+		t.Fatalf("second run: got %d messages, want 1", len(msgs))
 	}
 
-	if received[0].Text != "new message" {
-		t.Errorf("second run: got %q, want %q", received[0].Text, "new message")
+	if msgs[0].Text != "new message" {
+		t.Errorf("second run: got %q, want %q", msgs[0].Text, "new message")
 	}
 }
 
 // --- test helpers ---
+
+// messageCollector collects backend messages in a thread-safe way.
+type messageCollector struct {
+	mu       sync.Mutex
+	messages []backend.Message
+}
+
+func (mc *messageCollector) handler(_ context.Context, msg backend.Message) {
+	mc.mu.Lock()
+	mc.messages = append(mc.messages, msg)
+	mc.mu.Unlock()
+}
+
+func (mc *messageCollector) count() int {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	return len(mc.messages)
+}
+
+func (mc *messageCollector) get() []backend.Message {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	result := make([]backend.Message, len(mc.messages))
+	copy(result, mc.messages)
+
+	return result
+}
+
+func (mc *messageCollector) reset() {
+	mc.mu.Lock()
+	mc.messages = nil
+	mc.mu.Unlock()
+}
+
+// waitForMessages polls until at least n messages are collected or the timeout expires.
+func waitForMessages(t *testing.T, c *messageCollector, n int) {
+	t.Helper()
+
+	deadline := time.After(3 * time.Second)
+
+	for {
+		if c.count() >= n {
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d message(s), got %d", n, c.count())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// runBackendAsync starts the backend in a goroutine and returns a channel for the error.
+func runBackendAsync(ctx context.Context, b *Backend) <-chan error {
+	ch := make(chan error, 1)
+
+	go func() { ch <- b.Run(ctx) }()
+
+	return ch
+}
 
 func newTestBackend(t *testing.T, sk gonostr.SecretKey, relays []string, allowedUsers map[string]struct{}) *Backend {
 	t.Helper()
@@ -605,6 +429,22 @@ func newTestBackendWithHandler(t *testing.T, sk gonostr.SecretKey, relays []stri
 		Relays:         relays,
 		AllowedUsers:   allowedUsers,
 		SessionBaseDir: t.TempDir(),
+	}, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return b
+}
+
+func newTestBackendWithSessionDir(t *testing.T, sk gonostr.SecretKey, relays []string, sessionDir string, handler backend.MessageHandler) *Backend {
+	t.Helper()
+
+	b, err := NewBackend(Config{
+		PrivateKey:     sk.Hex(),
+		Relays:         relays,
+		AllowedUsers:   make(map[string]struct{}),
+		SessionBaseDir: sessionDir,
 	}, handler)
 	if err != nil {
 		t.Fatal(err)

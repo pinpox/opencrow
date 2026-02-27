@@ -37,8 +37,8 @@ func TestBackendType_Default(t *testing.T) {
 		t.Fatalf("loadConfig: %v", err)
 	}
 
-	if cfg.BackendType != "matrix" {
-		t.Errorf("BackendType = %q, want %q", cfg.BackendType, "matrix")
+	if cfg.BackendType != backendMatrix {
+		t.Errorf("BackendType = %q, want %q", cfg.BackendType, backendMatrix)
 	}
 }
 

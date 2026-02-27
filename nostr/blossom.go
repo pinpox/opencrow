@@ -79,7 +79,7 @@ func uploadToServer(ctx context.Context, server string, data []byte, contentType
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(data))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("creating upload request: %w", err)
 	}
 
 	req.Header.Set("Authorization", authHeader)
@@ -89,7 +89,7 @@ func uploadToServer(ctx context.Context, server string, data []byte, contentType
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("uploading to %s: %w", server, err)
 	}
 	defer resp.Body.Close()
 
@@ -121,7 +121,7 @@ func buildBlossomAuthEvent(hashHex string, keys Keys) (gonostr.Event, error) {
 		},
 	}
 	if err := evt.Sign(keys.SK); err != nil {
-		return evt, err
+		return evt, fmt.Errorf("signing blossom auth event: %w", err)
 	}
 
 	return evt, nil

@@ -39,8 +39,22 @@ func run() int {
 
 	pool.StartIdleReaper(ctx)
 
-	// The App needs the backend, but the backend needs the App's handler.
-	// Resolve this with a handler that forwards to the App once it's wired.
+	b, app, err := wireServices(ctx, cfg, pool)
+	if err != nil {
+		slog.Error("failed to initialize services", "error", err)
+
+		return 1
+	}
+
+	setupShutdown(b, pool, cancel)
+
+	slog.Info("opencrow starting")
+
+	return runBackend(ctx, b, app)
+}
+
+// wireServices creates the backend, app, heartbeat scheduler, and trigger pipe manager.
+func wireServices(ctx context.Context, cfg *Config, pool *PiPool) (backend.Backend, *App, error) { //nolint:ireturn // factory returns interface by design
 	var app *App
 
 	handler := func(ctx context.Context, msg backend.Message) {
@@ -53,28 +67,31 @@ func run() int {
 		app.HandleMessage(ctx, msg)
 	}
 
-	var b backend.Backend
-
-	switch cfg.BackendType {
-	case "matrix":
-		b, err = createMatrixBackend(cfg, pool, handler)
-	case "nostr":
-		b, err = createNostrBackend(cfg, handler)
-	default:
-		err = fmt.Errorf("unsupported backend type: %q", cfg.BackendType)
-	}
-
+	b, err := createBackend(cfg, pool, handler)
 	if err != nil {
-		slog.Error("failed to create backend", "error", err)
-
-		return 1
+		return nil, nil, err
 	}
 
 	app = NewApp(b, pool, nil)
-
-	// Update system prompt with backend-specific context
 	cfg.Pi.SystemPrompt = app.systemPrompt(cfg.Pi.SystemPrompt)
 
+	startSchedulers(ctx, cfg, pool, b, app)
+
+	return b, app, nil
+}
+
+func createBackend(cfg *Config, pool *PiPool, handler backend.MessageHandler) (backend.Backend, error) { //nolint:ireturn // factory returns interface by design
+	switch cfg.BackendType {
+	case backendMatrix:
+		return createMatrixBackend(cfg, pool, handler)
+	case backendNostr:
+		return createNostrBackend(cfg, handler)
+	default:
+		return nil, fmt.Errorf("unsupported backend type: %q", cfg.BackendType)
+	}
+}
+
+func startSchedulers(ctx context.Context, cfg *Config, pool *PiPool, b backend.Backend, app *App) {
 	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, func(ctx context.Context, roomID string, text string) {
 		b.SendMessage(ctx, roomID, text)
 	})
@@ -90,8 +107,9 @@ func run() int {
 	)
 	triggerMgr.Start(ctx)
 	app.triggerMgr = triggerMgr
+}
 
-	// Graceful shutdown
+func setupShutdown(b backend.Backend, pool *PiPool, cancel context.CancelFunc) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -102,9 +120,9 @@ func run() int {
 		pool.StopAll()
 		cancel()
 	}()
+}
 
-	slog.Info("opencrow starting")
-
+func runBackend(ctx context.Context, b backend.Backend, _ *App) int {
 	if err := b.Run(ctx); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("shutdown complete")
@@ -122,7 +140,7 @@ func run() int {
 	return 0
 }
 
-func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandler) (backend.Backend, error) {
+func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandler) (*matrix.Backend, error) {
 	matrixCfg := matrix.Config{
 		Homeserver:     cfg.Matrix.Homeserver,
 		UserID:         cfg.Matrix.UserID,
@@ -136,7 +154,7 @@ func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandl
 
 	b, err := matrix.New(matrixCfg, handler)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating matrix backend: %w", err)
 	}
 
 	b.SetRoomCleanupCallback(func(roomID string) {
@@ -146,7 +164,7 @@ func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandl
 	return b, nil
 }
 
-func createNostrBackend(cfg *Config, handler backend.MessageHandler) (backend.Backend, error) {
+func createNostrBackend(cfg *Config, handler backend.MessageHandler) (*nostrbackend.Backend, error) {
 	nostrCfg := nostrbackend.Config{
 		PrivateKey:     cfg.Nostr.PrivateKey,
 		Relays:         cfg.Nostr.Relays,
@@ -155,7 +173,12 @@ func createNostrBackend(cfg *Config, handler backend.MessageHandler) (backend.Ba
 		SessionBaseDir: cfg.Pi.SessionDir,
 	}
 
-	return nostrbackend.NewBackend(nostrCfg, handler)
+	b, err := nostrbackend.NewBackend(nostrCfg, handler)
+	if err != nil {
+		return nil, fmt.Errorf("creating nostr backend: %w", err)
+	}
+
+	return b, nil
 }
 
 func parseLogLevel(s string) slog.Level {

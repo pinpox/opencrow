@@ -21,34 +21,37 @@ func loadKeys(raw string) (Keys, error) {
 		return Keys{}, errors.New("empty private key")
 	}
 
-	var sk gonostr.SecretKey
-
-	if strings.HasPrefix(raw, "nsec") {
-		prefix, val, err := nip19.Decode(raw)
-		if err != nil {
-			return Keys{}, fmt.Errorf("decoding nsec: %w", err)
-		}
-
-		if prefix != "nsec" {
-			return Keys{}, fmt.Errorf("expected nsec prefix, got %s", prefix)
-		}
-
-		var ok bool
-
-		sk, ok = val.(gonostr.SecretKey)
-		if !ok {
-			return Keys{}, fmt.Errorf("nsec decoded to unexpected type %T", val)
-		}
-	} else {
-		var err error
-
-		sk, err = gonostr.SecretKeyFromHex(raw)
-		if err != nil {
-			return Keys{}, fmt.Errorf("parsing hex secret key: %w", err)
-		}
+	sk, err := parseSecretKey(raw)
+	if err != nil {
+		return Keys{}, err
 	}
 
-	pk := sk.Public()
+	return Keys{SK: sk, PK: sk.Public()}, nil
+}
 
-	return Keys{SK: sk, PK: pk}, nil
+func parseSecretKey(raw string) (gonostr.SecretKey, error) {
+	if !strings.HasPrefix(raw, "nsec") {
+		sk, err := gonostr.SecretKeyFromHex(raw)
+		if err != nil {
+			return gonostr.SecretKey{}, fmt.Errorf("parsing hex secret key: %w", err)
+		}
+
+		return sk, nil
+	}
+
+	prefix, val, err := nip19.Decode(raw)
+	if err != nil {
+		return gonostr.SecretKey{}, fmt.Errorf("decoding nsec: %w", err)
+	}
+
+	if prefix != "nsec" {
+		return gonostr.SecretKey{}, fmt.Errorf("expected nsec prefix, got %s", prefix)
+	}
+
+	sk, ok := val.(gonostr.SecretKey)
+	if !ok {
+		return gonostr.SecretKey{}, fmt.Errorf("nsec decoded to unexpected type %T", val)
+	}
+
+	return sk, nil
 }

@@ -11,7 +11,7 @@ import (
 
 // StartTestRelay spins up an in-process Nostr relay backed by an in-memory
 // slice store. It returns the WebSocket URL (ws://...) and a cleanup function.
-func StartTestRelay(t *testing.T) (url string, cleanup func()) {
+func StartTestRelay(t *testing.T) (string, func()) {
 	t.Helper()
 
 	relay := khatru.NewRelay()
