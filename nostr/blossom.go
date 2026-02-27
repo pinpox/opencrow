@@ -168,10 +168,12 @@ func downloadURL(ctx context.Context, rawURL, sessionBaseDir, conversationID str
 	limited := io.LimitReader(resp.Body, maxDownloadSize+1)
 	n, err := io.Copy(f, limited)
 	if err != nil {
+		// Remove the partial file so failed downloads don't leak on disk.
+		f.Close()
+		os.Remove(destPath)
 		return "", fmt.Errorf("writing file: %w", err)
 	}
 	if n > maxDownloadSize {
-		// Clean up the oversized file before returning the error.
 		f.Close()
 		os.Remove(destPath)
 		return "", fmt.Errorf("download exceeds maximum size of %d bytes", maxDownloadSize)
