@@ -225,9 +225,9 @@ in
       }
     ];
 
-    # State directory on host (bind-mounted into container)
+    # Host-side directory needed for the bind mount into the container.
     systemd.tmpfiles.rules = [
-      "d /var/lib/opencrow 0750 root root -"
+      "d /var/lib/opencrow 0750 - - -"
     ];
 
     # Work around stale machined registration after unclean shutdown.
@@ -264,6 +264,13 @@ in
         {
           system.stateVersion = "25.05";
 
+          users.users.opencrow = {
+            isSystemUser = true;
+            group = "opencrow";
+            home = "/var/lib/opencrow";
+          };
+          users.groups.opencrow = { };
+
           systemd.services.opencrow = {
             description = "OpenCrow Messaging Bot";
             wantedBy = [ "multi-user.target" ];
@@ -287,7 +294,11 @@ in
               ExecStart = lib.getExe opencrowPkg;
               Restart = "on-failure";
               RestartSec = 10;
+              User = "opencrow";
+              Group = "opencrow";
               WorkingDirectory = "/var/lib/opencrow";
+              StateDirectory = "opencrow";
+              StateDirectoryMode = "0750";
             };
           };
 
