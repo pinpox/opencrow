@@ -121,6 +121,17 @@ in
             example = "wss://relay.damus.io,wss://nos.lol";
           };
 
+          OPENCROW_NOSTR_DM_RELAYS = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = ''
+              Comma-separated relay URLs to advertise in the bot's NIP-17 DM relay
+              list (kind 10050). Only list relays that accept kind 1059 gift wraps.
+              If empty, falls back to OPENCROW_NOSTR_RELAYS.
+            '';
+            example = "wss://relay.damus.io,wss://nos.lol";
+          };
+
           OPENCROW_NOSTR_PRIVATE_KEY_FILE = lib.mkOption {
             type = lib.types.str;
             default = "";

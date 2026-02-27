@@ -168,6 +168,7 @@ func createNostrBackend(cfg *Config, handler backend.MessageHandler) (*nostrback
 	nostrCfg := nostrbackend.Config{
 		PrivateKey:     cfg.Nostr.PrivateKey,
 		Relays:         cfg.Nostr.Relays,
+		DMRelays:       cfg.Nostr.DMRelays,
 		BlossomServers: cfg.Nostr.BlossomServers,
 		AllowedUsers:   cfg.Nostr.AllowedUsers,
 		SessionBaseDir: cfg.Pi.SessionDir,

@@ -132,6 +132,54 @@ func TestNostrConfig_BlossomServers(t *testing.T) {
 	}
 }
 
+func TestNostrConfig_DMRelays(t *testing.T) {
+	t.Parallel()
+
+	t.Run("explicit", func(t *testing.T) {
+		t.Parallel()
+
+		env := baseNostrEnv()
+		env["OPENCROW_NOSTR_DM_RELAYS"] = "wss://dm1.example.com, wss://dm2.example.com"
+
+		cfg, err := loadConfig(testEnv(env))
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+
+		want := []string{"wss://dm1.example.com", "wss://dm2.example.com"}
+		if len(cfg.Nostr.DMRelays) != len(want) {
+			t.Fatalf("got %d DM relays, want %d", len(cfg.Nostr.DMRelays), len(want))
+		}
+
+		for i, r := range cfg.Nostr.DMRelays {
+			if r != want[i] {
+				t.Errorf("DMRelays[%d] = %q, want %q", i, r, want[i])
+			}
+		}
+	})
+
+	t.Run("defaults to Relays", func(t *testing.T) {
+		t.Parallel()
+
+		env := baseNostrEnv()
+
+		cfg, err := loadConfig(testEnv(env))
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+
+		if len(cfg.Nostr.DMRelays) != len(cfg.Nostr.Relays) {
+			t.Fatalf("DMRelays len = %d, want %d (same as Relays)", len(cfg.Nostr.DMRelays), len(cfg.Nostr.Relays))
+		}
+
+		for i, r := range cfg.Nostr.DMRelays {
+			if r != cfg.Nostr.Relays[i] {
+				t.Errorf("DMRelays[%d] = %q, want %q", i, r, cfg.Nostr.Relays[i])
+			}
+		}
+	})
+}
+
 func TestNostrConfig_MissingRelays(t *testing.T) {
 	t.Parallel()
 

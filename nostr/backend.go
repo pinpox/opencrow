@@ -20,7 +20,8 @@ import (
 // Config holds Nostr-specific configuration.
 type Config struct {
 	PrivateKey     string
-	Relays         []string
+	Relays         []string // general relays for querying and subscribing
+	DMRelays       []string // relays advertised in kind 10050 for DM delivery
 	BlossomServers []string
 	AllowedUsers   map[string]struct{}
 	SessionBaseDir string
@@ -56,6 +57,11 @@ func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 	keys, err := loadKeys(cfg.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("nostr: failed to load keys: %w", err)
+	}
+
+	// Default DMRelays to Relays if not explicitly configured.
+	if len(cfg.DMRelays) == 0 {
+		cfg.DMRelays = cfg.Relays
 	}
 
 	ttl := 7 * 24 * time.Hour // 7 days — covers NIP-59 randomization window with margin
@@ -129,16 +135,26 @@ func (b *Backend) Run(ctx context.Context) error {
 }
 
 // discoverSubscriptionRelays returns the full set of relays to subscribe on:
-// the bot's configured relays plus the DM relay lists of all allowed users.
+// the bot's configured relays, its DM relays, plus the DM relay lists of all
+// allowed users.
 func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
-	seen := make(map[string]struct{}, len(b.cfg.Relays))
-	relays := make([]string, 0, len(b.cfg.Relays))
+	seen := make(map[string]struct{}, len(b.cfg.Relays)+len(b.cfg.DMRelays))
+	relays := make([]string, 0, len(b.cfg.Relays)+len(b.cfg.DMRelays))
 
-	for _, r := range b.cfg.Relays {
-		if _, ok := seen[r]; !ok {
-			seen[r] = struct{}{}
+	addRelay := func(r string) {
+		normalized := strings.TrimRight(r, "/")
+		if _, ok := seen[normalized]; !ok {
+			seen[normalized] = struct{}{}
 			relays = append(relays, r)
 		}
+	}
+
+	for _, r := range b.cfg.Relays {
+		addRelay(r)
+	}
+
+	for _, r := range b.cfg.DMRelays {
+		addRelay(r)
 	}
 
 	if len(b.cfg.AllowedUsers) == 0 {
@@ -167,8 +183,9 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 		for _, tag := range ie.Tags {
 			if len(tag) >= 2 && tag[0] == "relay" {
 				r := tag[1]
-				if _, ok := seen[r]; !ok {
-					seen[r] = struct{}{}
+				normalized := strings.TrimRight(r, "/")
+				if _, ok := seen[normalized]; !ok {
+					seen[normalized] = struct{}{}
 					relays = append(relays, r)
 					slog.Info("nostr: discovered user DM relay", "pubkey", userHex, "relay", r)
 				}
@@ -181,9 +198,11 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 
 // publishDMRelayList publishes a NIP-17 DM relay list (kind 10050) so
 // clients can discover where to send gift-wrapped DMs to this bot.
+// Uses DMRelays (not Relays) because some general-purpose relays silently
+// drop kind 1059 gift wraps.
 func (b *Backend) publishDMRelayList(ctx context.Context) {
-	tags := make(gonostr.Tags, 0, len(b.cfg.Relays))
-	for _, relay := range b.cfg.Relays {
+	tags := make(gonostr.Tags, 0, len(b.cfg.DMRelays))
+	for _, relay := range b.cfg.DMRelays {
 		tags = append(tags, gonostr.Tag{"relay", relay})
 	}
 
@@ -345,16 +364,32 @@ func (b *Backend) sendDM(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Po
 		return
 	}
 
-	for _, relayURL := range b.cfg.Relays {
+	// Publish our copy to our DM relays.
+	for _, relayURL := range b.cfg.DMRelays {
 		r, err := pool.EnsureRelay(relayURL)
 		if err != nil {
 			slog.Warn("nostr: failed to connect to relay", "relay", relayURL, "error", err)
-
 			continue
 		}
 
 		if err := r.Publish(ctx, toUs); err != nil {
 			slog.Warn("nostr: failed to publish toUs", "relay", relayURL, "error", err)
+		}
+	}
+
+	// Publish their copy to the recipient's DM relays (fallback to our DM relays).
+	theirRelays := nip17.GetDMRelays(ctx, recipientPK, pool, b.cfg.Relays)
+	if len(theirRelays) == 0 {
+		theirRelays = b.cfg.DMRelays
+	}
+
+	slog.Debug("nostr: sending DM", "recipient", recipientPK.Hex(), "their_relays", theirRelays)
+
+	for _, relayURL := range theirRelays {
+		r, err := pool.EnsureRelay(relayURL)
+		if err != nil {
+			slog.Warn("nostr: failed to connect to relay", "relay", relayURL, "error", err)
+			continue
 		}
 
 		if err := r.Publish(ctx, toThem); err != nil {

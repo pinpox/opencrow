@@ -43,6 +43,7 @@ type MatrixConfig struct {
 type NostrConfig struct {
 	PrivateKey     string              // hex secret key (resolved from file or env)
 	Relays         []string            // OPENCROW_NOSTR_RELAYS
+	DMRelays       []string            // OPENCROW_NOSTR_DM_RELAYS (published in kind 10050; defaults to Relays)
 	BlossomServers []string            // OPENCROW_NOSTR_BLOSSOM_SERVERS
 	AllowedUsers   map[string]struct{} // OPENCROW_NOSTR_ALLOWED_USERS (hex pubkeys)
 	SessionBaseDir string              // shared with PiConfig.SessionDir
@@ -308,6 +309,12 @@ func loadNostrConfig(getenv func(string) string, sessionBaseDir string) (NostrCo
 		return NostrConfig{}, errors.New("OPENCROW_NOSTR_RELAYS is required (comma-separated relay URLs)")
 	}
 
+	dmRelays := parseCommaSeparated(getenv("OPENCROW_NOSTR_DM_RELAYS"))
+	// If not set, default to Relays for backward compat.
+	if len(dmRelays) == 0 {
+		dmRelays = relays
+	}
+
 	allowedUsers, err := parseNostrAllowedUsers(getenv("OPENCROW_NOSTR_ALLOWED_USERS"))
 	if err != nil {
 		return NostrConfig{}, err
@@ -316,6 +323,7 @@ func loadNostrConfig(getenv func(string) string, sessionBaseDir string) (NostrCo
 	return NostrConfig{
 		PrivateKey:     privateKey,
 		Relays:         relays,
+		DMRelays:       dmRelays,
 		BlossomServers: parseCommaSeparated(getenv("OPENCROW_NOSTR_BLOSSOM_SERVERS")),
 		AllowedUsers:   allowedUsers,
 		SessionBaseDir: sessionBaseDir,
