@@ -43,6 +43,10 @@ func run() int {
 	// Resolve this with a handler that forwards to the App once it's wired.
 	var app *App
 	handler := func(ctx context.Context, msg backend.Message) {
+		if app == nil {
+			slog.Error("received message before app was initialized")
+			return
+		}
 		app.HandleMessage(ctx, msg)
 	}
 
