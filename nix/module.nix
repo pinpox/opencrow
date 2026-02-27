@@ -8,6 +8,16 @@
 let
   cfg = config.services.opencrow;
   opencrowPkg = cfg.package;
+
+  # Host-side wrapper to run pi inside the container as the opencrow user,
+  # e.g. `opencrow-pi auth login` to complete OAuth.
+  opencrowPi = pkgs.writeShellScriptBin "opencrow-pi" ''
+    exec machinectl shell opencrow@opencrow \
+      /run/current-system/sw/bin/env \
+        HOME=/var/lib/opencrow \
+        PI_CODING_AGENT_DIR=${cfg.environment.PI_CODING_AGENT_DIR} \
+      ${lib.getExe cfg.piPackage} "$@"
+  '';
 in
 {
   options.services.opencrow = {
@@ -224,6 +234,9 @@ in
         message = "OPENCROW_NOSTR_PRIVATE_KEY_FILE or a private key in environmentFiles is required when OPENCROW_BACKEND is nostr.";
       }
     ];
+
+    # Host-side wrapper for interactive pi usage (e.g. opencrow-pi auth login).
+    environment.systemPackages = [ opencrowPi ];
 
     # Host-side directory needed for the bind mount into the container.
     systemd.tmpfiles.rules = [
