@@ -346,6 +346,52 @@ func TestRestartDropsStaleMessages(t *testing.T) {
 	}
 }
 
+func TestRun_SubscribesAllowedUserDMRelays(t *testing.T) {
+	t.Parallel()
+
+	// Two separate relays: bot is configured with relayA only.
+	// Sender publishes their kind 10050 listing relayB, then sends a DM
+	// to relayB. Bot should discover relayB and receive the message.
+	relayA, cleanupA := testutil.StartTestRelay(t)
+	defer cleanupA()
+
+	relayB, cleanupB := testutil.StartTestRelay(t)
+	defer cleanupB()
+
+	botSK := gonostr.Generate()
+	senderSK := gonostr.Generate()
+	senderPK := senderSK.Public()
+
+	// Publish sender's DM relay list (kind 10050) on relayA so the bot can discover it.
+	publishDMRelayListEvent(t, relayA, senderSK, []string{relayB})
+
+	allowed := map[string]struct{}{senderPK.Hex(): {}}
+
+	mc := &messageCollector{}
+	b := newTestBackendWithHandler(t, botSK, []string{relayA}, allowed, mc.handler)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	runErr := runBackendAsync(ctx, b)
+	time.Sleep(500 * time.Millisecond)
+
+	// Send DM to relayB only — bot must have discovered it from the 10050.
+	sendTestDM(ctx, t, relayB, senderSK, b.keys.PK, "hello from relayB")
+
+	waitForMessages(t, mc, 1)
+	cancel()
+	<-runErr
+
+	msgs := mc.get()
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Text != "hello from relayB" {
+		t.Errorf("text = %q, want %q", msgs[0].Text, "hello from relayB")
+	}
+}
+
 // --- test helpers ---
 
 // messageCollector collects backend messages in a thread-safe way.
@@ -451,6 +497,40 @@ func newTestBackendWithSessionDir(t *testing.T, sk gonostr.SecretKey, relays []s
 	}
 
 	return b
+}
+
+// publishDMRelayListEvent publishes a kind 10050 event listing the given relays.
+func publishDMRelayListEvent(t *testing.T, publishRelay string, sk gonostr.SecretKey, dmRelays []string) {
+	t.Helper()
+
+	tags := make(gonostr.Tags, 0, len(dmRelays))
+	for _, r := range dmRelays {
+		tags = append(tags, gonostr.Tag{"relay", r})
+	}
+
+	evt := gonostr.Event{
+		Kind:      gonostr.KindDMRelayList,
+		CreatedAt: gonostr.Now(),
+		Tags:      tags,
+		PubKey:    sk.Public(),
+	}
+	if err := evt.Sign(sk); err != nil {
+		t.Fatalf("signing DM relay list: %v", err)
+	}
+
+	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	defer pool.Close("test done")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	r, err := pool.EnsureRelay(publishRelay)
+	if err != nil {
+		t.Fatalf("connecting to relay: %v", err)
+	}
+	if err := r.Publish(ctx, evt); err != nil {
+		t.Fatalf("publishing DM relay list: %v", err)
+	}
 }
 
 // sendTestDM sends a NIP-17 gift-wrapped DM from sender to recipient via the relay.

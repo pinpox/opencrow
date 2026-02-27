@@ -87,9 +87,14 @@ func (b *Backend) Run(ctx context.Context) error {
 	// bot's preferred DM relays.
 	b.publishDMRelayList(ctx)
 
+	// Discover allowed users' DM relay lists so we also subscribe there.
+	// NIP-17 clients send gift wraps to the sender's own DM relays when
+	// they don't know the recipient's, so we need to listen on those too.
+	subRelays := b.discoverSubscriptionRelays(ctx)
+
 	since := sinceFromSeenRumors(b.seenRumors, b.seenTTL)
 
-	slog.Info("nostr: subscribing to DMs", "pubkey", b.keys.PK.Hex(), "since", since, "seen_rumors", len(b.seenRumors), "relays", b.cfg.Relays)
+	slog.Info("nostr: subscribing to DMs", "pubkey", b.keys.PK.Hex(), "since", since, "seen_rumors", len(b.seenRumors), "relays", subRelays)
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -97,7 +102,7 @@ func (b *Backend) Run(ctx context.Context) error {
 	b.cancelFn = cancel
 	b.cancelMu.Unlock()
 
-	events := b.pool.SubscribeMany(ctx, b.cfg.Relays, gonostr.Filter{
+	events := b.pool.SubscribeMany(ctx, subRelays, gonostr.Filter{
 		Kinds: []gonostr.Kind{gonostr.KindGiftWrap},
 		Tags:  gonostr.TagMap{"p": {b.keys.PK.Hex()}},
 		Since: since,
@@ -121,6 +126,57 @@ func (b *Backend) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// discoverSubscriptionRelays returns the full set of relays to subscribe on:
+// the bot's configured relays plus the DM relay lists of all allowed users.
+func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
+	seen := make(map[string]struct{}, len(b.cfg.Relays))
+	relays := make([]string, 0, len(b.cfg.Relays))
+
+	for _, r := range b.cfg.Relays {
+		if _, ok := seen[r]; !ok {
+			seen[r] = struct{}{}
+			relays = append(relays, r)
+		}
+	}
+
+	if len(b.cfg.AllowedUsers) == 0 {
+		return relays
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	for userHex := range b.cfg.AllowedUsers {
+		pk, err := gonostr.PubKeyFromHex(userHex)
+		if err != nil {
+			slog.Warn("nostr: invalid allowed user pubkey", "pubkey", userHex, "error", err)
+			continue
+		}
+
+		ie := b.pool.QuerySingle(queryCtx, b.cfg.Relays, gonostr.Filter{
+			Authors: []gonostr.PubKey{pk},
+			Kinds:   []gonostr.Kind{gonostr.KindDMRelayList},
+		}, gonostr.SubscriptionOptions{})
+		if ie == nil {
+			slog.Debug("nostr: no DM relay list found for user", "pubkey", userHex)
+			continue
+		}
+
+		for _, tag := range ie.Tags {
+			if len(tag) >= 2 && tag[0] == "relay" {
+				r := tag[1]
+				if _, ok := seen[r]; !ok {
+					seen[r] = struct{}{}
+					relays = append(relays, r)
+					slog.Info("nostr: discovered user DM relay", "pubkey", userHex, "relay", r)
+				}
+			}
+		}
+	}
+
+	return relays
 }
 
 // publishDMRelayList publishes a NIP-17 DM relay list (kind 10050) so
