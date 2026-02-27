@@ -15,6 +15,8 @@ import (
 )
 
 func TestSendMessage_PublishesGiftWrap(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
@@ -88,6 +90,8 @@ func TestSendMessage_PublishesGiftWrap(t *testing.T) {
 }
 
 func TestRun_ReceivesDM(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
@@ -119,7 +123,7 @@ func TestRun_ReceivesDM(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	sendTestDM(t, ctx, wsURL, senderSK, b.keys.PK, "hello bot")
+	sendTestDM(ctx, t, wsURL, senderSK, b.keys.PK, "hello bot")
 
 	deadline := time.After(3 * time.Second)
 
@@ -159,6 +163,8 @@ func TestRun_ReceivesDM(t *testing.T) {
 }
 
 func TestRun_DropsDisallowedUser(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
@@ -194,11 +200,11 @@ func TestRun_DropsDisallowedUser(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Send from disallowed user first
-	sendTestDM(t, ctx, wsURL, disallowedSK, b.keys.PK, "should be dropped")
+	sendTestDM(ctx, t, wsURL, disallowedSK, b.keys.PK, "should be dropped")
 	time.Sleep(200 * time.Millisecond)
 
 	// Then from allowed user
-	sendTestDM(t, ctx, wsURL, allowedSK, b.keys.PK, "should be received")
+	sendTestDM(ctx, t, wsURL, allowedSK, b.keys.PK, "should be received")
 
 	deadline := time.After(3 * time.Second)
 
@@ -236,6 +242,8 @@ func TestRun_DropsDisallowedUser(t *testing.T) {
 }
 
 func TestSingleActiveConversation(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
@@ -270,11 +278,11 @@ func TestSingleActiveConversation(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// A sends first — becomes active
-	sendTestDM(t, ctx, wsURL, userASK, b.keys.PK, "from A")
+	sendTestDM(ctx, t, wsURL, userASK, b.keys.PK, "from A")
 	time.Sleep(300 * time.Millisecond)
 
 	// B sends — should be dropped
-	sendTestDM(t, ctx, wsURL, userBSK, b.keys.PK, "from B")
+	sendTestDM(ctx, t, wsURL, userBSK, b.keys.PK, "from B")
 	time.Sleep(300 * time.Millisecond)
 
 	cancel()
@@ -293,6 +301,8 @@ func TestSingleActiveConversation(t *testing.T) {
 }
 
 func TestResetConversation(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
@@ -328,7 +338,7 @@ func TestResetConversation(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// A sends — becomes active
-	sendTestDM(t, ctx, wsURL, userASK, b.keys.PK, "from A")
+	sendTestDM(ctx, t, wsURL, userASK, b.keys.PK, "from A")
 	time.Sleep(300 * time.Millisecond)
 
 	// Reset A's conversation
@@ -336,7 +346,7 @@ func TestResetConversation(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// B sends — should be accepted now
-	sendTestDM(t, ctx, wsURL, userBSK, b.keys.PK, "from B")
+	sendTestDM(ctx, t, wsURL, userBSK, b.keys.PK, "from B")
 
 	deadline := time.After(3 * time.Second)
 
@@ -372,6 +382,8 @@ func TestResetConversation(t *testing.T) {
 }
 
 func TestSeenRumorsPersistence(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
@@ -410,7 +422,7 @@ func TestSeenRumorsPersistence(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	sendTestDM(t, ctx, wsURL, senderSK, b.keys.PK, "first message")
+	sendTestDM(ctx, t, wsURL, senderSK, b.keys.PK, "first message")
 
 	deadline := time.After(3 * time.Second)
 
@@ -441,6 +453,8 @@ func TestSeenRumorsPersistence(t *testing.T) {
 }
 
 func TestRestartDropsStaleMessages(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
@@ -480,7 +494,7 @@ func TestRestartDropsStaleMessages(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	sendTestDM(t, ctx1, wsURL, senderSK, b1.keys.PK, "old message")
+	sendTestDM(ctx1, t, wsURL, senderSK, b1.keys.PK, "old message")
 
 	deadline := time.After(3 * time.Second)
 
@@ -533,7 +547,7 @@ func TestRestartDropsStaleMessages(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Send a new message — this one should be delivered
-	sendTestDM(t, ctx2, wsURL, senderSK, b2.keys.PK, "new message")
+	sendTestDM(ctx2, t, wsURL, senderSK, b2.keys.PK, "new message")
 
 	deadline = time.After(3 * time.Second)
 
@@ -600,7 +614,7 @@ func newTestBackendWithHandler(t *testing.T, sk gonostr.SecretKey, relays []stri
 }
 
 // sendTestDM sends a NIP-17 gift-wrapped DM from sender to recipient via the relay.
-func sendTestDM(t *testing.T, ctx context.Context, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, content string) {
+func sendTestDM(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, content string) {
 	t.Helper()
 
 	pool := gonostr.NewPool(gonostr.PoolOptions{})

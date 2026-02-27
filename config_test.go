@@ -1,17 +1,40 @@
 package main
 
 import (
-	"os"
 	"testing"
 )
 
-func TestBackendType_Default(t *testing.T) {
-	clearConfigEnv(t)
-	setRequiredMatrixEnv(t)
+// testEnv returns a getenv function backed by a map.
+func testEnv(m map[string]string) func(string) string {
+	return func(key string) string {
+		return m[key]
+	}
+}
 
-	cfg, err := LoadConfig()
+// baseMatrixEnv returns the minimum env needed for a matrix backend config.
+func baseMatrixEnv() map[string]string {
+	return map[string]string{
+		"OPENCROW_MATRIX_HOMESERVER":   "https://matrix.example.com",
+		"OPENCROW_MATRIX_USER_ID":      "@bot:example.com",
+		"OPENCROW_MATRIX_ACCESS_TOKEN": "syt_test_token",
+	}
+}
+
+// baseNostrEnv returns the minimum env needed for a nostr backend config.
+func baseNostrEnv() map[string]string {
+	return map[string]string{
+		"OPENCROW_BACKEND":           "nostr",
+		"OPENCROW_NOSTR_PRIVATE_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
+		"OPENCROW_NOSTR_RELAYS":      "wss://relay.example.com",
+	}
+}
+
+func TestBackendType_Default(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(testEnv(baseMatrixEnv()))
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("loadConfig: %v", err)
 	}
 
 	if cfg.BackendType != "matrix" {
@@ -20,70 +43,26 @@ func TestBackendType_Default(t *testing.T) {
 }
 
 func TestBackendType_Unknown(t *testing.T) {
-	clearConfigEnv(t)
-	setRequiredMatrixEnv(t)
-	t.Setenv("OPENCROW_BACKEND", "telegram")
+	t.Parallel()
 
-	_, err := LoadConfig()
+	env := baseMatrixEnv()
+	env["OPENCROW_BACKEND"] = "telegram"
+
+	_, err := loadConfig(testEnv(env))
 	if err == nil {
 		t.Fatal("expected error for unknown backend, got nil")
 	}
 }
 
-// clearConfigEnv unsets all OPENCROW env vars to get a clean test state.
-func clearConfigEnv(t *testing.T) {
-	t.Helper()
-
-	for _, key := range []string{
-		"OPENCROW_BACKEND",
-		"OPENCROW_MATRIX_HOMESERVER",
-		"OPENCROW_MATRIX_USER_ID",
-		"OPENCROW_MATRIX_ACCESS_TOKEN",
-		"OPENCROW_MATRIX_DEVICE_ID",
-		"OPENCROW_MATRIX_PICKLE_KEY",
-		"OPENCROW_MATRIX_CRYPTO_DB",
-		"OPENCROW_ALLOWED_USERS",
-		"OPENCROW_PI_BINARY",
-		"OPENCROW_PI_SESSION_DIR",
-		"OPENCROW_PI_PROVIDER",
-		"OPENCROW_PI_MODEL",
-		"OPENCROW_PI_WORKING_DIR",
-		"OPENCROW_PI_IDLE_TIMEOUT",
-		"OPENCROW_PI_SYSTEM_PROMPT",
-		"OPENCROW_PI_SKILLS",
-		"OPENCROW_PI_SKILLS_DIR",
-		"OPENCROW_SOUL_FILE",
-		"OPENCROW_HEARTBEAT_INTERVAL",
-		"OPENCROW_HEARTBEAT_PROMPT",
-		"OPENCROW_LOG_LEVEL",
-		"OPENCROW_NOSTR_PRIVATE_KEY",
-		"OPENCROW_NOSTR_PRIVATE_KEY_FILE",
-		"OPENCROW_NOSTR_RELAYS",
-		"OPENCROW_NOSTR_BLOSSOM_SERVERS",
-		"OPENCROW_NOSTR_ALLOWED_USERS",
-	} {
-		t.Setenv(key, "")
-		os.Unsetenv(key)
-	}
-}
-
-// setRequiredMatrixEnv sets the minimum env vars needed for LoadConfig to succeed
-// when backend=matrix (the default).
-func setRequiredMatrixEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv("OPENCROW_MATRIX_HOMESERVER", "https://matrix.example.com")
-	t.Setenv("OPENCROW_MATRIX_USER_ID", "@bot:example.com")
-	t.Setenv("OPENCROW_MATRIX_ACCESS_TOKEN", "syt_test_token")
-}
-
 func TestNostrConfig_RelayParsing(t *testing.T) {
-	clearConfigEnv(t)
-	setRequiredNostrEnv(t)
-	t.Setenv("OPENCROW_NOSTR_RELAYS", "wss://relay1.example.com, wss://relay2.example.com")
+	t.Parallel()
 
-	cfg, err := LoadConfig()
+	env := baseNostrEnv()
+	env["OPENCROW_NOSTR_RELAYS"] = "wss://relay1.example.com, wss://relay2.example.com"
+
+	cfg, err := loadConfig(testEnv(env))
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("loadConfig: %v", err)
 	}
 
 	want := []string{"wss://relay1.example.com", "wss://relay2.example.com"}
@@ -99,17 +78,16 @@ func TestNostrConfig_RelayParsing(t *testing.T) {
 }
 
 func TestNostrConfig_AllowedUsersNpubDecoding(t *testing.T) {
-	clearConfigEnv(t)
-	setRequiredNostrEnv(t)
+	t.Parallel()
 
-	// npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq23sn3t (all zeros pubkey)
-	// Use a real hex pubkey and its npub equivalent
 	hexPK := "0000000000000000000000000000000000000000000000000000000000000001"
-	t.Setenv("OPENCROW_NOSTR_ALLOWED_USERS", hexPK)
 
-	cfg, err := LoadConfig()
+	env := baseNostrEnv()
+	env["OPENCROW_NOSTR_ALLOWED_USERS"] = hexPK
+
+	cfg, err := loadConfig(testEnv(env))
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("loadConfig: %v", err)
 	}
 
 	if _, ok := cfg.Nostr.AllowedUsers[hexPK]; !ok {
@@ -118,25 +96,28 @@ func TestNostrConfig_AllowedUsersNpubDecoding(t *testing.T) {
 }
 
 func TestNostrConfig_MissingPrivateKey(t *testing.T) {
-	clearConfigEnv(t)
-	t.Setenv("OPENCROW_BACKEND", "nostr")
-	t.Setenv("OPENCROW_NOSTR_RELAYS", "wss://relay.example.com")
-	// No private key set
+	t.Parallel()
 
-	_, err := LoadConfig()
+	env := map[string]string{
+		"OPENCROW_BACKEND":      "nostr",
+		"OPENCROW_NOSTR_RELAYS": "wss://relay.example.com",
+	}
+
+	_, err := loadConfig(testEnv(env))
 	if err == nil {
 		t.Fatal("expected error for missing private key, got nil")
 	}
 }
 
 func TestNostrConfig_BlossomServers(t *testing.T) {
-	clearConfigEnv(t)
-	setRequiredNostrEnv(t)
-	t.Setenv("OPENCROW_NOSTR_BLOSSOM_SERVERS", "https://blossom1.example.com, https://blossom2.example.com")
+	t.Parallel()
 
-	cfg, err := LoadConfig()
+	env := baseNostrEnv()
+	env["OPENCROW_NOSTR_BLOSSOM_SERVERS"] = "https://blossom1.example.com, https://blossom2.example.com"
+
+	cfg, err := loadConfig(testEnv(env))
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("loadConfig: %v", err)
 	}
 
 	want := []string{"https://blossom1.example.com", "https://blossom2.example.com"}
@@ -152,22 +133,15 @@ func TestNostrConfig_BlossomServers(t *testing.T) {
 }
 
 func TestNostrConfig_MissingRelays(t *testing.T) {
-	clearConfigEnv(t)
-	t.Setenv("OPENCROW_BACKEND", "nostr")
-	t.Setenv("OPENCROW_NOSTR_PRIVATE_KEY", "0000000000000000000000000000000000000000000000000000000000000001")
-	// No relays set
+	t.Parallel()
 
-	_, err := LoadConfig()
+	env := map[string]string{
+		"OPENCROW_BACKEND":           "nostr",
+		"OPENCROW_NOSTR_PRIVATE_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
+	}
+
+	_, err := loadConfig(testEnv(env))
 	if err == nil {
 		t.Fatal("expected error for missing relays, got nil")
 	}
-}
-
-// setRequiredNostrEnv sets the minimum env vars needed for LoadConfig to succeed
-// when backend=nostr.
-func setRequiredNostrEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv("OPENCROW_BACKEND", "nostr")
-	t.Setenv("OPENCROW_NOSTR_PRIVATE_KEY", "0000000000000000000000000000000000000000000000000000000000000001")
-	t.Setenv("OPENCROW_NOSTR_RELAYS", "wss://relay.example.com")
 }

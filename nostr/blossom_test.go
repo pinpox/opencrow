@@ -16,6 +16,8 @@ import (
 )
 
 func TestSendFile_UploadsToBlossom(t *testing.T) {
+	t.Parallel()
+
 	var receivedBody []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +70,8 @@ func TestSendFile_UploadsToBlossom(t *testing.T) {
 }
 
 func TestSendFile_BlossomFallback(t *testing.T) {
+	t.Parallel()
+
 	// First server fails
 	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
@@ -113,6 +117,8 @@ func TestSendFile_BlossomFallback(t *testing.T) {
 }
 
 func TestReceive_URLAttachmentDownload(t *testing.T) {
+	t.Parallel()
+
 	// Start a test HTTP server serving an image
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
@@ -148,6 +154,8 @@ func TestReceive_URLAttachmentDownload(t *testing.T) {
 }
 
 func TestDownloadURL_ExceedsMaxSize(t *testing.T) {
+	t.Parallel()
+
 	// Serve a response larger than maxDownloadSize.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -189,6 +197,8 @@ func TestDownloadURL_ExceedsMaxSize(t *testing.T) {
 }
 
 func TestSendFile_AllBlossomsFail(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 	}))

@@ -8,6 +8,8 @@ import (
 )
 
 func TestLoadKeys_Hex(t *testing.T) {
+	t.Parallel()
+
 	sk := gonostr.Generate()
 	wantPK := sk.Public()
 
@@ -26,6 +28,8 @@ func TestLoadKeys_Hex(t *testing.T) {
 }
 
 func TestLoadKeys_Nsec(t *testing.T) {
+	t.Parallel()
+
 	sk := gonostr.Generate()
 	wantPK := sk.Public()
 	nsec := nip19.EncodeNsec(sk)

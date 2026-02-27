@@ -9,6 +9,8 @@ import (
 )
 
 func TestStartTestRelay_SmokeTest(t *testing.T) {
+	t.Parallel()
+
 	wsURL, cleanup := StartTestRelay(t)
 	defer cleanup()
 

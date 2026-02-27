@@ -12,6 +12,7 @@ linters:
     - lll
     - wsl
     - misspell
+    - testpackage
   settings:
     tagliatelle:
       case:

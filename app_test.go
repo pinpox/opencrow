@@ -72,6 +72,8 @@ func (m *mockBackend) SystemPromptExtra() string {
 }
 
 func TestApp_Restart(t *testing.T) {
+	t.Parallel()
+
 	mb := &mockBackend{}
 	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
 	app := NewApp(mb, pool, nil)
@@ -100,6 +102,8 @@ func TestApp_Restart(t *testing.T) {
 }
 
 func TestApp_Skills(t *testing.T) {
+	t.Parallel()
+
 	mb := &mockBackend{}
 	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
 	app := NewApp(mb, pool, nil)
@@ -120,6 +124,8 @@ func TestApp_Skills(t *testing.T) {
 }
 
 func TestApp_SystemPrompt(t *testing.T) {
+	t.Parallel()
+
 	mb := &mockBackend{systemPromptExtraText: "You are in a Nostr DM."}
 	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
 	app := NewApp(mb, pool, nil)
@@ -133,6 +139,8 @@ func TestApp_SystemPrompt(t *testing.T) {
 }
 
 func TestApp_SystemPrompt_NoExtra(t *testing.T) {
+	t.Parallel()
+
 	mb := &mockBackend{}
 	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
 	app := NewApp(mb, pool, nil)
