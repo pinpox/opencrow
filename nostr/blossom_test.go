@@ -132,8 +132,8 @@ func TestReceive_URLAttachmentDownload(t *testing.T) {
 		t.Errorf("file content = %q, want %q", data, "fake png data")
 	}
 
-	// Verify path is under session dir
-	wantDir := filepath.Join(sessionDir, "attachments")
+	// Verify path is under per-conversation attachments dir
+	wantDir := filepath.Join(sessionDir, conversationID, "attachments")
 	if filepath.Dir(localPath) != wantDir {
 		t.Errorf("file dir = %q, want %q", filepath.Dir(localPath), wantDir)
 	}

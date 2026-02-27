@@ -147,7 +147,7 @@ func downloadURL(ctx context.Context, rawURL, sessionBaseDir, conversationID str
 	}
 	filename = sanitizeFilename(filename)
 
-	downloadDir := filepath.Join(sessionBaseDir, "attachments")
+	downloadDir := filepath.Join(sessionBaseDir, conversationID, "attachments")
 	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating attachments dir: %w", err)
 	}
