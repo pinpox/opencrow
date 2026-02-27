@@ -82,6 +82,11 @@ func (b *Backend) Run(ctx context.Context) error {
 	kr := keyer.NewPlainKeySigner(b.keys.SK)
 	b.kr = kr
 
+	// Publish NIP-17 DM relay list (kind 10050) so clients know where to
+	// send gift wraps. Without this, apps like 0xchat cannot discover the
+	// bot's preferred DM relays.
+	b.publishDMRelayList(ctx)
+
 	since := sinceFromSeenRumors(b.seenRumors, b.seenTTL)
 
 	slog.Info("nostr: subscribing to DMs", "pubkey", b.keys.PK.Hex(), "since", since, "seen_rumors", len(b.seenRumors), "relays", b.cfg.Relays)
@@ -116,6 +121,39 @@ func (b *Backend) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// publishDMRelayList publishes a NIP-17 DM relay list (kind 10050) so
+// clients can discover where to send gift-wrapped DMs to this bot.
+func (b *Backend) publishDMRelayList(ctx context.Context) {
+	tags := make(gonostr.Tags, 0, len(b.cfg.Relays))
+	for _, relay := range b.cfg.Relays {
+		tags = append(tags, gonostr.Tag{"relay", relay})
+	}
+
+	evt := gonostr.Event{
+		Kind:      gonostr.KindDMRelayList,
+		CreatedAt: gonostr.Now(),
+		Tags:      tags,
+		PubKey:    b.keys.PK,
+	}
+	if err := evt.Sign(b.keys.SK); err != nil {
+		slog.Error("nostr: failed to sign DM relay list", "error", err)
+		return
+	}
+
+	for _, relayURL := range b.cfg.Relays {
+		r, err := b.pool.EnsureRelay(relayURL)
+		if err != nil {
+			slog.Warn("nostr: failed to connect for DM relay list", "relay", relayURL, "error", err)
+			continue
+		}
+		if err := r.Publish(ctx, evt); err != nil {
+			slog.Warn("nostr: failed to publish DM relay list", "relay", relayURL, "error", err)
+		} else {
+			slog.Info("nostr: published DM relay list", "relay", relayURL)
+		}
+	}
 }
 
 // Stop signals the backend to shut down.
