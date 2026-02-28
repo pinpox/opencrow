@@ -220,10 +220,6 @@ func discoverSkills(dir string) []string {
 	var skills []string
 
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
 		skillPath := filepath.Join(dir, entry.Name())
 		skillFile := filepath.Join(skillPath, "SKILL.md")
 

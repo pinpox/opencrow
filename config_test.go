@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -178,6 +180,32 @@ func TestNostrConfig_DMRelays(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestDiscoverSkills_Symlinks(t *testing.T) {
+	t.Parallel()
+
+	// Create a target directory with SKILL.md
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a skills dir with a symlink to the target
+	skillsDir := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(skillsDir, "my-skill")); err != nil {
+		t.Fatal(err)
+	}
+
+	skills := discoverSkills(skillsDir)
+	if len(skills) != 1 {
+		t.Fatalf("got %d skills, want 1: %v", len(skills), skills)
+	}
+
+	want := filepath.Join(skillsDir, "my-skill")
+	if skills[0] != want {
+		t.Errorf("skill path = %q, want %q", skills[0], want)
+	}
 }
 
 func TestNostrConfig_MissingRelays(t *testing.T) {
