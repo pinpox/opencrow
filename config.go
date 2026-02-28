@@ -47,6 +47,10 @@ type NostrConfig struct {
 	BlossomServers []string            // OPENCROW_NOSTR_BLOSSOM_SERVERS
 	AllowedUsers   map[string]struct{} // OPENCROW_NOSTR_ALLOWED_USERS (hex pubkeys)
 	SessionBaseDir string              // shared with PiConfig.SessionDir
+	Name           string              // OPENCROW_NOSTR_NAME (kind 0 "name")
+	DisplayName    string              // OPENCROW_NOSTR_DISPLAY_NAME (kind 0 "display_name")
+	About          string              // OPENCROW_NOSTR_ABOUT (kind 0 "about")
+	Picture        string              // OPENCROW_NOSTR_PICTURE (kind 0 "picture" URL)
 }
 
 type PiConfig struct {
@@ -323,6 +327,10 @@ func loadNostrConfig(getenv func(string) string, sessionBaseDir string) (NostrCo
 		BlossomServers: parseCommaSeparated(getenv("OPENCROW_NOSTR_BLOSSOM_SERVERS")),
 		AllowedUsers:   allowedUsers,
 		SessionBaseDir: sessionBaseDir,
+		Name:           getenv("OPENCROW_NOSTR_NAME"),
+		DisplayName:    getenv("OPENCROW_NOSTR_DISPLAY_NAME"),
+		About:          getenv("OPENCROW_NOSTR_ABOUT"),
+		Picture:        getenv("OPENCROW_NOSTR_PICTURE"),
 	}, nil
 }
 

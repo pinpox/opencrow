@@ -172,6 +172,12 @@ func createNostrBackend(cfg *Config, handler backend.MessageHandler) (*nostrback
 		BlossomServers: cfg.Nostr.BlossomServers,
 		AllowedUsers:   cfg.Nostr.AllowedUsers,
 		SessionBaseDir: cfg.Pi.SessionDir,
+		Profile: nostrbackend.ProfileConfig{
+			Name:        cfg.Nostr.Name,
+			DisplayName: cfg.Nostr.DisplayName,
+			About:       cfg.Nostr.About,
+			Picture:     cfg.Nostr.Picture,
+		},
 	}
 
 	b, err := nostrbackend.NewBackend(nostrCfg, handler)

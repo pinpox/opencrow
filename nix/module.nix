@@ -151,6 +151,30 @@ in
             description = "Comma-separated npubs or hex pubkeys allowed to interact with the bot. Empty allows all.";
           };
 
+          OPENCROW_NOSTR_NAME = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Bot profile name (NIP-01 kind 0 'name' field).";
+          };
+
+          OPENCROW_NOSTR_DISPLAY_NAME = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Bot profile display name (NIP-01 kind 0 'display_name' field).";
+          };
+
+          OPENCROW_NOSTR_ABOUT = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Bot profile about/bio (NIP-01 kind 0 'about' field).";
+          };
+
+          OPENCROW_NOSTR_PICTURE = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Bot profile picture URL (NIP-01 kind 0 'picture' field).";
+          };
+
           OPENCROW_PI_PROVIDER = lib.mkOption {
             type = lib.types.str;
             default = "anthropic";

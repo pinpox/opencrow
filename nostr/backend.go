@@ -3,6 +3,7 @@ package nostr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -17,6 +18,14 @@ import (
 	"github.com/pinpox/opencrow/backend"
 )
 
+// ProfileConfig holds NIP-01 kind 0 metadata fields.
+type ProfileConfig struct {
+	Name        string // NIP-01 "name"
+	DisplayName string // NIP-01 "display_name"
+	About       string // NIP-01 "about"
+	Picture     string // NIP-01 "picture"
+}
+
 // Config holds Nostr-specific configuration.
 type Config struct {
 	PrivateKey     string
@@ -25,6 +34,7 @@ type Config struct {
 	BlossomServers []string
 	AllowedUsers   map[string]struct{}
 	SessionBaseDir string
+	Profile        ProfileConfig
 }
 
 // Backend implements backend.Backend for Nostr NIP-17 DMs.
@@ -87,6 +97,9 @@ func (b *Backend) Run(ctx context.Context) error {
 	// Create keyer for NIP-44 encrypt/decrypt
 	kr := keyer.NewPlainKeySigner(b.keys.SK)
 	b.kr = kr
+
+	// Publish NIP-01 profile metadata (kind 0) so the bot has a name/about.
+	b.publishProfile(ctx)
 
 	// Publish NIP-17 DM relay list (kind 10050) so clients know where to
 	// send gift wraps. Without this, apps like 0xchat cannot discover the
@@ -194,6 +207,59 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 	}
 
 	return relays
+}
+
+// publishProfile publishes a NIP-01 kind 0 metadata event so the bot
+// has a visible name, about, and picture on Nostr clients.
+func (b *Backend) publishProfile(ctx context.Context) {
+	p := b.cfg.Profile
+	if p.Name == "" && p.DisplayName == "" && p.About == "" && p.Picture == "" {
+		return
+	}
+
+	meta := make(map[string]string)
+	if p.Name != "" {
+		meta["name"] = p.Name
+	}
+	if p.DisplayName != "" {
+		meta["display_name"] = p.DisplayName
+	}
+	if p.About != "" {
+		meta["about"] = p.About
+	}
+	if p.Picture != "" {
+		meta["picture"] = p.Picture
+	}
+
+	content, err := json.Marshal(meta)
+	if err != nil {
+		slog.Error("nostr: failed to marshal profile metadata", "error", err)
+		return
+	}
+
+	evt := gonostr.Event{
+		Kind:      0,
+		CreatedAt: gonostr.Now(),
+		Content:   string(content),
+		PubKey:    b.keys.PK,
+	}
+	if err := evt.Sign(b.keys.SK); err != nil {
+		slog.Error("nostr: failed to sign profile event", "error", err)
+		return
+	}
+
+	for _, relayURL := range b.cfg.Relays {
+		r, err := b.pool.EnsureRelay(relayURL)
+		if err != nil {
+			slog.Warn("nostr: failed to connect for profile", "relay", relayURL, "error", err)
+			continue
+		}
+		if err := r.Publish(ctx, evt); err != nil {
+			slog.Warn("nostr: failed to publish profile", "relay", relayURL, "error", err)
+		} else {
+			slog.Info("nostr: published profile", "relay", relayURL)
+		}
+	}
 }
 
 // publishDMRelayList publishes a NIP-17 DM relay list (kind 10050) so
