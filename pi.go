@@ -34,6 +34,10 @@ type PiProcess struct {
 	lastUse    time.Time
 	roomID     string
 	onToolCall func(ToolCallEvent) // optional callback for tool_execution_start events
+
+	// cancelMu protects cancelFunc for concurrent access from Abort().
+	cancelMu   sync.Mutex
+	cancelFunc context.CancelFunc
 }
 
 // StartPi spawns a pi --mode rpc subprocess for the given room.
@@ -189,6 +193,19 @@ func (p *PiProcess) Prompt(ctx context.Context, message string) (string, error) 
 		return "", err
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	p.cancelMu.Lock()
+	p.cancelFunc = cancel
+	p.cancelMu.Unlock()
+
+	defer func() {
+		p.cancelMu.Lock()
+		p.cancelFunc = nil
+		p.cancelMu.Unlock()
+	}()
+
 	return p.waitForResult(ctx)
 }
 
@@ -206,7 +223,35 @@ func (p *PiProcess) PromptNoTouch(ctx context.Context, message string) (string, 
 		return "", err
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	p.cancelMu.Lock()
+	p.cancelFunc = cancel
+	p.cancelMu.Unlock()
+
+	defer func() {
+		p.cancelMu.Lock()
+		p.cancelFunc = nil
+		p.cancelMu.Unlock()
+	}()
+
 	return p.waitForResult(ctx)
+}
+
+// Abort cancels the currently running prompt, if any.
+// Safe to call concurrently from another goroutine (e.g. !stop handler).
+func (p *PiProcess) Abort() bool {
+	p.cancelMu.Lock()
+	cancel := p.cancelFunc
+	p.cancelMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		return true
+	}
+
+	return false
 }
 
 // Kill terminates the pi process.

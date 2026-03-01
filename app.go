@@ -59,6 +59,8 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	switch msg.Text {
 	case "!restart":
 		a.handleRestart(ctx, msg)
+	case "!stop":
+		a.handleStop(ctx, msg)
 	case "!skills":
 		a.handleSkills(ctx, msg)
 	default:
@@ -70,6 +72,20 @@ func (a *App) handleRestart(ctx context.Context, msg backend.Message) {
 	a.backend.ResetConversation(ctx, msg.ConversationID)
 	a.pool.Remove(msg.ConversationID)
 	a.backend.SendMessage(ctx, msg.ConversationID, "Session restarted. Next message will use a fresh process.")
+}
+
+func (a *App) handleStop(ctx context.Context, msg backend.Message) {
+	pi, err := a.pool.Get(ctx, msg.ConversationID)
+	if err != nil {
+		a.backend.SendMessage(ctx, msg.ConversationID, "No active session.")
+		return
+	}
+
+	if pi.Abort() {
+		a.backend.SendMessage(ctx, msg.ConversationID, "Aborted current operation.")
+	} else {
+		a.backend.SendMessage(ctx, msg.ConversationID, "Nothing running to stop.")
+	}
 }
 
 func (a *App) handleSkills(ctx context.Context, msg backend.Message) {
