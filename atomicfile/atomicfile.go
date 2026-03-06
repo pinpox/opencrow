@@ -31,6 +31,13 @@ func Write(destPath string, data []byte) error {
 		return fmt.Errorf("writing temp file: %w", err)
 	}
 
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+
+		return fmt.Errorf("syncing temp file: %w", err)
+	}
+
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 
@@ -41,6 +48,21 @@ func Write(destPath string, data []byte) error {
 		os.Remove(tmpPath)
 
 		return fmt.Errorf("renaming into place: %w", err)
+	}
+
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("opening directory for sync: %w", err)
+	}
+
+	if err := dirFd.Sync(); err != nil {
+		dirFd.Close()
+
+		return fmt.Errorf("syncing directory: %w", err)
+	}
+
+	if err := dirFd.Close(); err != nil {
+		return fmt.Errorf("closing directory: %w", err)
 	}
 
 	return nil
