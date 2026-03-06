@@ -33,10 +33,19 @@ func TestSendMessage_PublishesGiftWrap(t *testing.T) {
 	kr := keyer.NewPlainKeySigner(botSK)
 	b.pool = pool
 	b.kr = kr
+	b.pubQueue.setPool(pool)
+
+	go b.pubQueue.run(ctx)
 
 	b.SendMessage(ctx, recipientPK.Hex(), "hello from bot", "")
+	b.pubQueue.Flush(ctx)
 
-	events := pool.FetchMany(ctx, []string{wsURL}, gonostr.Filter{
+	// Use a separate pool for fetching so the subscription is created
+	// after the events have been published and indexed by the relay.
+	fetchPool := gonostr.NewPool(gonostr.PoolOptions{})
+	defer fetchPool.Close("fetch done")
+
+	events := fetchPool.FetchMany(ctx, []string{wsURL}, gonostr.Filter{
 		Kinds: []gonostr.Kind{gonostr.KindGiftWrap},
 	}, gonostr.SubscriptionOptions{})
 
@@ -374,6 +383,7 @@ func TestRun_SubscribesAllowedUserDMRelays(t *testing.T) {
 	defer cancel()
 
 	runErr := runBackendAsync(ctx, b)
+
 	time.Sleep(500 * time.Millisecond)
 
 	// Send DM to relayB only — bot must have discovered it from the 10050.
@@ -387,6 +397,7 @@ func TestRun_SubscribesAllowedUserDMRelays(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("got %d messages, want 1", len(msgs))
 	}
+
 	if msgs[0].Text != "hello from relayB" {
 		t.Errorf("text = %q, want %q", msgs[0].Text, "hello from relayB")
 	}
@@ -408,6 +419,7 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 	defer cancel()
 
 	runErr := runBackendAsync(ctx, b)
+
 	time.Sleep(300 * time.Millisecond)
 
 	sendTestDM(ctx, t, wsURL, senderSK, b.keys.PK, "hello bot")
@@ -433,6 +445,7 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 	senderKr := keyer.NewPlainKeySigner(senderSK)
 
 	var foundReaction bool
+
 	for ie := range events {
 		rumor, err := nip59.GiftUnwrap(ie.Event,
 			func(otherpubkey gonostr.PubKey, ciphertext string) (string, error) {
@@ -442,6 +455,7 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 		if err != nil {
 			continue
 		}
+
 		if rumor.Kind != gonostr.KindReaction {
 			continue
 		}
@@ -451,12 +465,14 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 		if rumor.Content != "👍" {
 			t.Errorf("reaction content = %q, want %q", rumor.Content, "👍")
 		}
+
 		if rumor.PubKey != botSK.Public() {
 			t.Errorf("reaction pubkey = %s, want %s", rumor.PubKey, botSK.Public())
 		}
 
 		// Verify e tag references the original DM rumor.
 		var hasETag, hasPTag, hasKTag bool
+
 		for _, tag := range rumor.Tags {
 			if len(tag) >= 2 {
 				switch tag[0] {
@@ -477,12 +493,15 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 				}
 			}
 		}
+
 		if !hasETag {
 			t.Error("reaction missing e tag")
 		}
+
 		if !hasPTag {
 			t.Error("reaction missing p tag")
 		}
+
 		if !hasKTag {
 			t.Error("reaction missing k tag")
 		}
@@ -513,6 +532,7 @@ func TestSendReaction_DisallowedUserNoReaction(t *testing.T) {
 	defer cancel()
 
 	runErr := runBackendAsync(ctx, b)
+
 	time.Sleep(300 * time.Millisecond)
 
 	// Send DM from disallowed user — should not trigger a reaction.
@@ -544,6 +564,7 @@ func TestSendReaction_DisallowedUserNoReaction(t *testing.T) {
 		if err != nil {
 			continue
 		}
+
 		if rumor.Kind == gonostr.KindReaction {
 			t.Fatal("reaction was sent for disallowed user, expected none")
 		}
@@ -566,6 +587,7 @@ func TestRun_ReplyThreadingSetsReplyToID(t *testing.T) {
 	defer cancel()
 
 	runErr := runBackendAsync(ctx, b)
+
 	time.Sleep(300 * time.Millisecond)
 
 	// Send a DM with an "e" tag (simulating a reply).
@@ -726,6 +748,7 @@ func publishDMRelayListEvent(t *testing.T, publishRelay string, sk gonostr.Secre
 	if err != nil {
 		t.Fatalf("connecting to relay: %v", err)
 	}
+
 	if err := r.Publish(ctx, evt); err != nil {
 		t.Fatalf("publishing DM relay list: %v", err)
 	}

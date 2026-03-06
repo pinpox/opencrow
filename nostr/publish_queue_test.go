@@ -14,7 +14,7 @@ import (
 
 const unreachableRelay = "ws://127.0.0.1:1"
 
-func TestPublishQueue_EnqueueAndRetry(t *testing.T) {
+func TestPublishQueue_EnqueueAndDrain(t *testing.T) {
 	t.Parallel()
 
 	wsURL, cleanup := testutil.StartTestRelay(t)
@@ -23,31 +23,23 @@ func TestPublishQueue_EnqueueAndRetry(t *testing.T) {
 	pool := gonostr.NewPool(gonostr.PoolOptions{})
 	defer pool.Close("test done")
 
-	q := newPublishQueue(t.TempDir(), pool)
+	q := newPublishQueue(t.TempDir())
+	q.setPool(pool)
+
 	evt := signTestEvent(t)
 
-	// Enqueue with the relay as "failed" — the relay is actually up,
-	// so retry should succeed.
-	q.enqueue(evt, []string{wsURL}, []string{wsURL})
+	q.enqueue(evt, []string{wsURL}, "test")
 
 	if q.Len() != 1 {
 		t.Fatalf("queue length = %d, want 1", q.Len())
 	}
 
-	// Force immediate retry by setting NextRetry to the past.
-	q.mu.Lock()
-	q.items[0].NextRetry = time.Now().Add(-time.Second)
-	q.mu.Unlock()
-
+	// Items are due immediately, so drain should publish them.
 	ctx := context.Background()
-	retried := q.retryOnce(ctx)
-
-	if retried != 1 {
-		t.Fatalf("retried = %d, want 1", retried)
-	}
+	q.drainOnce(ctx)
 
 	if q.Len() != 0 {
-		t.Errorf("queue length after retry = %d, want 0", q.Len())
+		t.Errorf("queue length after drain = %d, want 0", q.Len())
 	}
 
 	// Verify the event actually landed on the relay.
@@ -68,11 +60,11 @@ func TestPublishQueue_EnqueueAndRetry(t *testing.T) {
 	}
 
 	if !found {
-		t.Error("event not found on relay after retry")
+		t.Error("event not found on relay after drain")
 	}
 }
 
-func TestPublishQueue_PerRelayTracking(t *testing.T) {
+func TestPublishQueue_PartialSuccess_DeliveredNotPersisted(t *testing.T) {
 	t.Parallel()
 
 	goodURL, cleanupGood := testutil.StartTestRelay(t)
@@ -82,28 +74,30 @@ func TestPublishQueue_PerRelayTracking(t *testing.T) {
 	defer pool.Close("test done")
 
 	dir := t.TempDir()
-	q := newPublishQueue(dir, pool)
+	q := newPublishQueue(dir)
+	q.setPool(pool)
 
 	evt := signTestEvent(t)
 
-	// Good relay succeeded initially, bad relay failed.
-	q.enqueue(evt, []string{goodURL, unreachableRelay}, []string{unreachableRelay})
+	// Enqueue to one good relay and one unreachable relay.
+	q.enqueue(evt, []string{goodURL, unreachableRelay}, "test")
 
+	ctx := context.Background()
+	q.drainOnce(ctx)
+
+	// Good relay succeeded → item is delivered. Bad relay still pending.
 	if q.Len() != 1 {
-		t.Fatalf("queue length = %d, want 1", q.Len())
+		t.Fatalf("queue length = %d, want 1 (bad relay still pending)", q.Len())
 	}
 
-	// Item is already delivered (good relay worked), so it should be
-	// in-memory only for best-effort retries.
 	q.mu.Lock()
 	if !q.items[0].Delivered {
 		t.Error("item should be marked as delivered (one relay succeeded)")
 	}
 
-	q.saveLocked()
 	q.mu.Unlock()
 
-	// Verify persistence: delivered items should NOT be written to disk.
+	// Delivered items should NOT be persisted to disk.
 	data, err := os.ReadFile(filepath.Join(dir, publishQueueFile))
 	if err != nil {
 		t.Fatal(err)
@@ -125,10 +119,13 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	evt := signTestEvent(t)
 
-	// First "run": enqueue with an unreachable relay so item stays undelivered.
+	// First "run": enqueue to an unreachable relay, drain fails, persists.
 	pool1 := gonostr.NewPool(gonostr.PoolOptions{})
-	q1 := newPublishQueue(dir, pool1)
-	q1.enqueue(evt, []string{unreachableRelay}, []string{unreachableRelay})
+
+	q1 := newPublishQueue(dir)
+	q1.setPool(pool1)
+	q1.enqueue(evt, []string{unreachableRelay}, "test")
+	q1.drainOnce(context.Background())
 
 	if q1.Len() != 1 {
 		t.Fatalf("q1 length = %d, want 1", q1.Len())
@@ -137,10 +134,7 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	pool1.Close("first run done")
 
 	// Second "run": load from disk, verify the item survived.
-	pool2 := gonostr.NewPool(gonostr.PoolOptions{})
-	defer pool2.Close("second run done")
-
-	q2 := newPublishQueue(dir, pool2)
+	q2 := newPublishQueue(dir)
 
 	if q2.Len() != 1 {
 		t.Fatalf("q2 length after reload = %d, want 1", q2.Len())
@@ -157,22 +151,17 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	if loaded.Delivered {
 		t.Error("loaded item should not be marked as delivered")
 	}
-
-	if len(loaded.FailedRelays) != 1 || loaded.FailedRelays[0] != unreachableRelay {
-		t.Errorf("loaded failed relays = %v, want [%s]", loaded.FailedRelays, unreachableRelay)
-	}
 }
 
 func TestPublishQueue_BackoffCapsAtMax(t *testing.T) {
 	t.Parallel()
 
-	// Verify backoff grows and is capped at maxBackoff.
 	prev := calcBackoff(1)
 
 	for attempt := 2; attempt <= 20; attempt++ {
 		cur := calcBackoff(attempt)
 		if cur < prev && cur != maxBackoff {
-			t.Errorf("calcBackoff(%d) = %v < calcBackoff(%d) = %v (should be monotonically increasing)", attempt, cur, attempt-1, prev)
+			t.Errorf("calcBackoff(%d) = %v < calcBackoff(%d) = %v", attempt, cur, attempt-1, prev)
 		}
 
 		if cur > maxBackoff {

@@ -15,47 +15,45 @@ import (
 )
 
 const (
-	publishQueueFile    = ".nostr_publish_queue"
-	initialBackoff      = 5 * time.Second
-	maxBackoff          = 5 * time.Minute
-	backoffMultiplier   = 2.0
-	publishTimeout      = 15 * time.Second
-	retryTickerInterval = 1 * time.Second
+	publishQueueFile  = ".nostr_publish_queue"
+	initialBackoff    = 5 * time.Second
+	maxBackoff        = 5 * time.Minute
+	backoffMultiplier = 2.0
+	publishTimeout    = 15 * time.Second
 )
 
 // publishItem is a single event that needs to be published to a set of relays.
-// Items are grouped: once at least one relay in the group accepts the event,
-// the item is removed from the persistent queue (best-effort retries continue
-// in-memory for the remaining relays).
+// Once at least one relay accepts the event, the item is removed from the
+// persistent queue (best-effort retries continue in-memory for remaining relays).
 type publishItem struct {
 	// Event is the signed Nostr event to publish.
 	Event gonostr.Event `json:"event"`
 	// Relays is the full set of target relay URLs for this item.
 	Relays []string `json:"relays"`
-	// FailedRelays tracks which relays still need delivery. Once empty
-	// or at least one relay has succeeded, the item graduates from
-	// persistent to best-effort.
+	// FailedRelays tracks which relays still need delivery.
 	FailedRelays []string `json:"failed_relays"`
 	// Delivered is true once at least one relay accepted the event.
 	Delivered bool `json:"delivered"`
-	// Attempts counts total retry rounds (across all relays).
+	// Attempts counts total publish rounds.
 	Attempts int `json:"attempts"`
-	// NextRetry is when this item should next be retried.
+	// NextRetry is when this item should next be attempted.
 	NextRetry time.Time `json:"next_retry"`
 	// CreatedAt records when the item was first enqueued.
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// publishQueue persists outgoing events that failed to publish to their
-// target relays. A background goroutine retries them with exponential
-// backoff. Once at least one relay per item accepts the event, the item
-// is removed from the persistent store but retries continue in-memory
-// for remaining relays.
+// publishQueue is an outbox that all publishes go through. A background
+// goroutine drains it, retrying with exponential backoff. Once at least
+// one relay per item accepts the event, the item is removed from the
+// persistent store but best-effort retries continue in-memory for
+// remaining relays.
 type publishQueue struct {
-	mu      sync.Mutex
-	items   []*publishItem
-	dataDir string
-	pool    *gonostr.Pool
+	mu           sync.Mutex
+	items        []*publishItem
+	flushWaiters []chan struct{} // closed after a drain pass completes
+	dataDir      string
+	pool         *gonostr.Pool // set via setPool before calling run
+	wake         chan struct{} // signals the drain loop that new work arrived
 }
 
 // Len returns the number of items in the queue.
@@ -80,59 +78,99 @@ func (q *publishQueue) PendingRelays() int {
 	return n
 }
 
-func newPublishQueue(dataDir string, pool *gonostr.Pool) *publishQueue {
+// Flush blocks until all currently-enqueued items have had at least one
+// publish attempt. Intended for tests.
+func (q *publishQueue) Flush(ctx context.Context) {
+	done := make(chan struct{})
+
+	q.mu.Lock()
+	q.flushWaiters = append(q.flushWaiters, done)
+	q.mu.Unlock()
+
+	q.signal()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+func newPublishQueue(dataDir string) *publishQueue {
 	q := &publishQueue{
 		dataDir: dataDir,
-		pool:    pool,
+		wake:    make(chan struct{}, 1),
 	}
 	q.load()
 
 	return q
 }
 
-// enqueue adds an event that failed to publish on one or more relays.
-// successRelays are relays that already accepted the event (if any).
-func (q *publishQueue) enqueue(evt gonostr.Event, allRelays []string, failedRelays []string) {
-	if len(failedRelays) == 0 {
+// setPool sets the relay pool used for publishing. Must be called before run.
+func (q *publishQueue) setPool(pool *gonostr.Pool) {
+	q.mu.Lock()
+	q.pool = pool
+	q.mu.Unlock()
+
+	// Wake the drain loop in case items were loaded from disk.
+	if q.Len() > 0 {
+		q.signal()
+	}
+}
+
+// enqueue adds an event to be published to the given relays. The drain
+// goroutine will handle the actual publishing.
+func (q *publishQueue) enqueue(evt gonostr.Event, relays []string, label string) {
+	if len(relays) == 0 {
 		return
 	}
 
-	delivered := len(failedRelays) < len(allRelays)
-
 	item := &publishItem{
 		Event:        evt,
-		Relays:       allRelays,
-		FailedRelays: failedRelays,
-		Delivered:    delivered,
-		Attempts:     1,
-		NextRetry:    time.Now().Add(initialBackoff),
+		Relays:       relays,
+		FailedRelays: relays,
+		Delivered:    false,
+		Attempts:     0,
+		NextRetry:    time.Now(), // due immediately
 		CreatedAt:    time.Now(),
 	}
 
 	q.mu.Lock()
-	defer q.mu.Unlock()
-
 	q.items = append(q.items, item)
 	q.saveLocked()
+	q.mu.Unlock()
+
+	slog.Debug("nostr: enqueued for publish",
+		"label", label,
+		"relays", len(relays),
+		"event_kind", evt.Kind,
+	)
+
+	q.signal()
 }
 
-// retryOnce processes all items that are due for retry. Returns the number of
-// items that were retried.
-func (q *publishQueue) retryOnce(ctx context.Context) int {
+// signal wakes the drain loop (non-blocking).
+func (q *publishQueue) signal() {
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// drainOnce processes all items that are due. Returns the time until the
+// next item is due, or 0 if nothing is pending.
+func (q *publishQueue) drainOnce(ctx context.Context) time.Duration {
 	q.mu.Lock()
-	due := q.collectDueItemsLocked()
+	due, nextWake := q.collectDueLocked()
 	q.mu.Unlock()
 
 	if len(due) == 0 {
-		return 0
+		q.notifyFlush()
+
+		return nextWake
 	}
 
-	retried := 0
-
 	for _, item := range due {
-		q.retryItem(ctx, item)
-
-		retried++
+		q.tryItem(ctx, item)
 	}
 
 	q.mu.Lock()
@@ -140,46 +178,81 @@ func (q *publishQueue) retryOnce(ctx context.Context) int {
 	q.saveLocked()
 	q.mu.Unlock()
 
-	return retried
+	q.notifyFlush()
+
+	// Re-check for the next wake time after cleanup.
+	q.mu.Lock()
+	_, nextWake = q.collectDueLocked()
+	q.mu.Unlock()
+
+	return nextWake
 }
 
-// collectDueItemsLocked returns items whose NextRetry has passed.
+// notifyFlush closes all pending flush waiter channels.
+func (q *publishQueue) notifyFlush() {
+	q.mu.Lock()
+	waiters := q.flushWaiters
+	q.flushWaiters = nil
+	q.mu.Unlock()
+
+	for _, ch := range waiters {
+		close(ch)
+	}
+}
+
+// collectDueLocked returns items whose NextRetry has passed, and the
+// duration until the next earliest retry (0 if nothing pending).
 // Must be called with q.mu held.
-func (q *publishQueue) collectDueItemsLocked() []*publishItem {
+func (q *publishQueue) collectDueLocked() ([]*publishItem, time.Duration) {
 	now := time.Now()
 
 	var due []*publishItem
 
+	var earliest time.Time
+
 	for _, item := range q.items {
 		if !item.NextRetry.After(now) {
 			due = append(due, item)
+		} else if earliest.IsZero() || item.NextRetry.Before(earliest) {
+			earliest = item.NextRetry
 		}
 	}
 
-	return due
+	if len(due) > 0 || earliest.IsZero() {
+		return due, 0
+	}
+
+	return nil, time.Until(earliest)
 }
 
-// retryItem attempts to publish the event to its remaining failed relays.
-func (q *publishQueue) retryItem(ctx context.Context, item *publishItem) {
+// tryItem attempts to publish the event to its remaining failed relays.
+func (q *publishQueue) tryItem(ctx context.Context, item *publishItem) {
 	var stillFailed []string
 
 	for _, relayURL := range item.FailedRelays {
 		if err := q.publishToRelay(ctx, relayURL, item.Event); err != nil {
-			slog.Warn("nostr: queue retry failed",
+			logLevel := slog.LevelWarn
+			if item.Attempts == 0 {
+				// First attempt failures are common (e.g. relay down),
+				// don't spam warnings for the initial try.
+				logLevel = slog.LevelDebug
+			}
+
+			slog.Log(ctx, logLevel, "nostr: publish failed",
 				"relay", relayURL,
 				"event_id", item.Event.ID.Hex(),
 				"event_kind", item.Event.Kind,
-				"attempts", item.Attempts,
+				"attempt", item.Attempts+1,
 				"error", err,
 			)
 
 			stillFailed = append(stillFailed, relayURL)
 		} else {
-			slog.Info("nostr: queue retry succeeded",
+			slog.Info("nostr: published",
 				"relay", relayURL,
 				"event_id", item.Event.ID.Hex(),
 				"event_kind", item.Event.Kind,
-				"attempts", item.Attempts,
+				"attempt", item.Attempts+1,
 			)
 
 			item.Delivered = true
@@ -217,7 +290,6 @@ func (q *publishQueue) cleanupLocked() {
 
 	for _, item := range q.items {
 		if len(item.FailedRelays) == 0 {
-			// Fully done — all relays accepted or no relays left.
 			continue
 		}
 
@@ -227,18 +299,38 @@ func (q *publishQueue) cleanupLocked() {
 	q.items = kept
 }
 
-// runRetryLoop runs the retry loop until ctx is cancelled.
-func (q *publishQueue) runRetryLoop(ctx context.Context) {
-	ticker := time.NewTicker(retryTickerInterval)
-	defer ticker.Stop()
-
+// run drains the queue until ctx is cancelled. It sleeps when idle and
+// wakes on new enqueues or when the next retry is due.
+func (q *publishQueue) run(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		nextWake := q.drainOnce(ctx)
+
+		if ctx.Err() != nil {
 			return
-		case <-ticker.C:
-			q.retryOnce(ctx)
 		}
+
+		if nextWake > 0 {
+			// Sleep until the next retry is due or new work arrives.
+			timer := time.NewTimer(nextWake)
+
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+
+				return
+			case <-q.wake:
+				timer.Stop()
+			case <-timer.C:
+			}
+		} else if q.Len() == 0 {
+			// Nothing pending — sleep until woken.
+			select {
+			case <-ctx.Done():
+				return
+			case <-q.wake:
+			}
+		}
+		// else: items are due right now, loop immediately.
 	}
 }
 

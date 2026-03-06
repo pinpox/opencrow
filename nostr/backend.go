@@ -86,6 +86,7 @@ func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 		seenGiftWrap: make(map[gonostr.ID]time.Time),
 		seenRumors:   loadSeenRumors(cfg.SessionBaseDir, ttl),
 		seenTTL:      ttl,
+		pubQueue:     newPublishQueue(cfg.SessionBaseDir),
 	}, nil
 }
 
@@ -101,8 +102,8 @@ func (b *Backend) Run(ctx context.Context) error {
 	kr := keyer.NewPlainKeySigner(b.keys.SK)
 	b.kr = kr
 
-	// Initialize the persistent publish queue for retrying failed publishes.
-	b.pubQueue = newPublishQueue(b.cfg.SessionBaseDir, b.pool)
+	// Wire the pool into the publish queue so it can connect to relays.
+	b.pubQueue.setPool(b.pool)
 
 	// Publish NIP-01 profile metadata (kind 0) so the bot has a name/about.
 	b.publishProfile(ctx)
@@ -136,8 +137,8 @@ func (b *Backend) Run(ctx context.Context) error {
 	// Periodically prune the dedup set so it doesn't grow unbounded.
 	go b.pruneSeenLoop(ctx)
 
-	// Retry failed publishes in the background.
-	go b.pubQueue.runRetryLoop(ctx)
+	// Drain the publish queue in the background.
+	go b.pubQueue.run(ctx)
 
 	for ie := range events {
 		if ctx.Err() != nil {
@@ -167,6 +168,7 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 		normalized := strings.TrimRight(r, "/")
 		if _, ok := seen[normalized]; !ok {
 			seen[normalized] = struct{}{}
+
 			relays = append(relays, r)
 		}
 	}
@@ -190,6 +192,7 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 		pk, err := gonostr.PubKeyFromHex(userHex)
 		if err != nil {
 			slog.Warn("nostr: invalid allowed user pubkey", "pubkey", userHex, "error", err)
+
 			continue
 		}
 
@@ -199,15 +202,18 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 		}, gonostr.SubscriptionOptions{})
 		if ie == nil {
 			slog.Debug("nostr: no DM relay list found for user", "pubkey", userHex)
+
 			continue
 		}
 
 		for _, tag := range ie.Tags {
 			if len(tag) >= 2 && tag[0] == "relay" {
 				r := tag[1]
+
 				normalized := strings.TrimRight(r, "/")
 				if _, ok := seen[normalized]; !ok {
 					seen[normalized] = struct{}{}
+
 					relays = append(relays, r)
 					slog.Info("nostr: discovered user DM relay", "pubkey", userHex, "relay", r)
 				}
@@ -220,7 +226,7 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 
 // publishProfile publishes a NIP-01 kind 0 metadata event so the bot
 // has a visible name, about, and picture on Nostr clients.
-func (b *Backend) publishProfile(ctx context.Context) {
+func (b *Backend) publishProfile(_ context.Context) {
 	p := b.cfg.Profile
 	if p.Name == "" && p.DisplayName == "" && p.About == "" && p.Picture == "" {
 		return
@@ -230,12 +236,15 @@ func (b *Backend) publishProfile(ctx context.Context) {
 	if p.Name != "" {
 		meta["name"] = p.Name
 	}
+
 	if p.DisplayName != "" {
 		meta["display_name"] = p.DisplayName
 	}
+
 	if p.About != "" {
 		meta["about"] = p.About
 	}
+
 	if p.Picture != "" {
 		meta["picture"] = p.Picture
 	}
@@ -243,6 +252,7 @@ func (b *Backend) publishProfile(ctx context.Context) {
 	content, err := json.Marshal(meta)
 	if err != nil {
 		slog.Error("nostr: failed to marshal profile metadata", "error", err)
+
 		return
 	}
 
@@ -254,17 +264,18 @@ func (b *Backend) publishProfile(ctx context.Context) {
 	}
 	if err := evt.Sign(b.keys.SK); err != nil {
 		slog.Error("nostr: failed to sign profile event", "error", err)
+
 		return
 	}
 
-	b.publishToRelays(ctx, b.pool, evt, b.cfg.Relays, "profile")
+	b.publishToRelays(evt, b.cfg.Relays, "profile")
 }
 
 // publishDMRelayList publishes a NIP-17 DM relay list (kind 10050) so
 // clients can discover where to send gift-wrapped DMs to this bot.
 // Uses DMRelays (not Relays) because some general-purpose relays silently
 // drop kind 1059 gift wraps.
-func (b *Backend) publishDMRelayList(ctx context.Context) {
+func (b *Backend) publishDMRelayList(_ context.Context) {
 	tags := make(gonostr.Tags, 0, len(b.cfg.DMRelays))
 	for _, relay := range b.cfg.DMRelays {
 		tags = append(tags, gonostr.Tag{"relay", relay})
@@ -278,10 +289,11 @@ func (b *Backend) publishDMRelayList(ctx context.Context) {
 	}
 	if err := evt.Sign(b.keys.SK); err != nil {
 		slog.Error("nostr: failed to sign DM relay list", "error", err)
+
 		return
 	}
 
-	b.publishToRelays(ctx, b.pool, evt, b.cfg.Relays, "DM relay list")
+	b.publishToRelays(evt, b.cfg.Relays, "DM relay list")
 }
 
 // Stop signals the backend to shut down.
@@ -476,7 +488,7 @@ func (b *Backend) buildDMRumor(ctx context.Context, kr gonostr.Keyer, recipientP
 // publishDMGiftWraps publishes the two gift-wrap copies to the appropriate relays.
 func (b *Backend) publishDMGiftWraps(ctx context.Context, pool *gonostr.Pool, toUs, toThem gonostr.Event, recipientPK gonostr.PubKey) {
 	// Publish our copy to our DM relays.
-	b.publishToRelays(ctx, pool, toUs, b.cfg.DMRelays, "DM toUs")
+	b.publishToRelays(toUs, b.cfg.DMRelays, "DM toUs")
 
 	// Publish their copy to the recipient's DM relays (fallback to our DM relays).
 	theirRelays := nip17.GetDMRelays(ctx, recipientPK, pool, b.cfg.Relays)
@@ -486,7 +498,7 @@ func (b *Backend) publishDMGiftWraps(ctx context.Context, pool *gonostr.Pool, to
 
 	slog.Debug("nostr: sending DM", "recipient", recipientPK.Hex(), "their_relays", theirRelays)
 
-	b.publishToRelays(ctx, pool, toThem, theirRelays, "DM toThem")
+	b.publishToRelays(toThem, theirRelays, "DM toThem")
 }
 
 // sendReaction sends a NIP-25 kind 7 reaction gift-wrapped via NIP-59 to
@@ -516,6 +528,7 @@ func (b *Backend) sendReaction(ctx context.Context, rumorID gonostr.ID, recipien
 	)
 	if err != nil {
 		slog.Warn("nostr: failed to gift-wrap reaction", "recipient", recipientPK.Hex(), "error", err)
+
 		return
 	}
 
@@ -525,40 +538,13 @@ func (b *Backend) sendReaction(ctx context.Context, rumorID gonostr.ID, recipien
 		theirRelays = b.cfg.DMRelays
 	}
 
-	b.publishToRelays(ctx, b.pool, toThem, theirRelays, "reaction")
+	b.publishToRelays(toThem, theirRelays, "reaction")
 }
 
-// publishToRelays publishes an event to a set of relays. Failed relays are
-// enqueued for persistent retry when the publish queue is available.
-func (b *Backend) publishToRelays(ctx context.Context, pool *gonostr.Pool, evt gonostr.Event, relays []string, label string) {
-	var failed []string
-
-	for _, relayURL := range relays {
-		r, err := pool.EnsureRelay(relayURL)
-		if err != nil {
-			slog.Warn("nostr: failed to connect", "label", label, "relay", relayURL, "error", err)
-			failed = append(failed, relayURL)
-
-			continue
-		}
-
-		if err := r.Publish(ctx, evt); err != nil {
-			slog.Warn("nostr: failed to publish", "label", label, "relay", relayURL, "error", err)
-			failed = append(failed, relayURL)
-		} else {
-			slog.Info("nostr: published", "label", label, "relay", relayURL, "event_kind", evt.Kind)
-		}
-	}
-
-	if len(failed) > 0 && b.pubQueue != nil {
-		b.pubQueue.enqueue(evt, relays, failed)
-		slog.Info("nostr: queued failed publishes for retry",
-			"label", label,
-			"failed_relays", len(failed),
-			"total_relays", len(relays),
-			"event_kind", evt.Kind,
-		)
-	}
+// publishToRelays enqueues an event for publishing to the given relays.
+// The actual publishing happens asynchronously via the queue's drain loop.
+func (b *Backend) publishToRelays(evt gonostr.Event, relays []string, label string) {
+	b.pubQueue.enqueue(evt, relays, label)
 }
 
 // processGiftWrap unwraps a kind 1059 event and dispatches to the handler.
@@ -718,5 +704,6 @@ func rumorReplyTarget(rumor gonostr.Event) string {
 			return tag[1]
 		}
 	}
+
 	return ""
 }
