@@ -503,11 +503,7 @@ func (b *Backend) publishDMGiftWraps(ctx context.Context, pool *gonostr.Pool, to
 	// Publish our copy to our DM relays.
 	b.publishToRelays(toUs, b.cfg.DMRelays, "DM toUs")
 
-	// Publish their copy to the recipient's DM relays (fallback to our DM relays).
-	theirRelays := nip17.GetDMRelays(ctx, recipientPK, pool, b.cfg.Relays)
-	if len(theirRelays) == 0 {
-		theirRelays = b.cfg.DMRelays
-	}
+	theirRelays := b.recipientRelays(ctx, recipientPK, pool)
 
 	slog.Debug("nostr: sending DM", "recipient", recipientPK.Hex(), "their_relays", theirRelays)
 
@@ -545,13 +541,18 @@ func (b *Backend) sendReaction(ctx context.Context, rumorID gonostr.ID, recipien
 		return
 	}
 
-	// Publish to recipient's DM relays (fallback to our DM relays).
-	theirRelays := nip17.GetDMRelays(ctx, recipientPK, b.pool, b.cfg.Relays)
-	if len(theirRelays) == 0 {
-		theirRelays = b.cfg.DMRelays
+	b.publishToRelays(toThem, b.recipientRelays(ctx, recipientPK, b.pool), "reaction")
+}
+
+// recipientRelays resolves the recipient's DM relays via NIP-17 discovery,
+// falling back to our own DM relays when the recipient has no list published.
+func (b *Backend) recipientRelays(ctx context.Context, recipientPK gonostr.PubKey, pool *gonostr.Pool) []string {
+	relays := nip17.GetDMRelays(ctx, recipientPK, pool, b.cfg.Relays)
+	if len(relays) == 0 {
+		return b.cfg.DMRelays
 	}
 
-	b.publishToRelays(toThem, theirRelays, "reaction")
+	return relays
 }
 
 // publishToRelays enqueues an event for publishing to the given relays.
