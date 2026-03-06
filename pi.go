@@ -283,10 +283,6 @@ func (p *PiProcess) sendAndWait(ctx context.Context, message string) (string, er
 		return "", errors.New("pi process is not alive")
 	}
 
-	if err := p.sendPromptCommand(message); err != nil {
-		return "", err
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -294,11 +290,16 @@ func (p *PiProcess) sendAndWait(ctx context.Context, message string) (string, er
 	p.cancelFunc = cancel
 	p.cancelMu.Unlock()
 
-	defer func() {
+	clearCancel := func() {
 		p.cancelMu.Lock()
 		p.cancelFunc = nil
 		p.cancelMu.Unlock()
-	}()
+	}
+	defer clearCancel()
+
+	if err := p.sendPromptCommand(message); err != nil {
+		return "", err
+	}
 
 	return p.waitForResult(ctx)
 }
