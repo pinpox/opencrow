@@ -112,14 +112,29 @@ func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
 		a.triggerMgr.StartRoom(ctx, msg.ConversationID)
 	}
 
-	var toolCallFn func(ToolCallEvent)
-	if a.pool.cfg.ShowToolCalls {
-		toolCallFn = func(evt ToolCallEvent) {
-			text := formatToolCall(evt)
-			a.backend.SendMessage(ctx, msg.ConversationID, text, "")
-		}
+	toolCallFn := a.makeToolCallFn(ctx, msg.ConversationID)
+	promptText := a.buildPromptText(msg)
+
+	reply := a.promptWithRetry(ctx, pi, msg.ConversationID, promptText, toolCallFn)
+
+	a.sendReplyWithFiles(ctx, msg.ConversationID, reply, msg.ReplyToID)
+}
+
+// makeToolCallFn returns a callback that relays tool-call events to the chat,
+// or nil when tool-call display is disabled.
+func (a *App) makeToolCallFn(ctx context.Context, conversationID string) func(ToolCallEvent) {
+	if !a.pool.cfg.ShowToolCalls {
+		return nil
 	}
 
+	return func(evt ToolCallEvent) {
+		text := formatToolCall(evt)
+		a.backend.SendMessage(ctx, conversationID, text, "")
+	}
+}
+
+// buildPromptText prepends reply-quote context to the message text.
+func (a *App) buildPromptText(msg backend.Message) string {
 	promptText := msg.Text
 
 	if msg.ReplyToID != "" {
@@ -130,41 +145,55 @@ func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
 		}
 	}
 
+	return promptText
+}
+
+// promptWithRetry sends the prompt to pi and re-prompts once when the
+// response is empty. On error the pi process is removed from the pool.
+func (a *App) promptWithRetry(ctx context.Context, pi *PiProcess, conversationID, promptText string, toolCallFn func(ToolCallEvent)) string {
 	reply, err := pi.Prompt(ctx, promptText, toolCallFn)
 	if err != nil {
-		slog.Error("pi prompt failed", "conversation", msg.ConversationID, "error", err)
-		a.pool.Remove(msg.ConversationID)
+		slog.Error("pi prompt failed", "conversation", conversationID, "error", err)
+		a.pool.Remove(conversationID)
 
-		reply = fmt.Sprintf("Error: %v", err)
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	if reply != "" {
+		return reply
+	}
+
+	slog.Warn("pi returned empty response, re-prompting for summary", "conversation", conversationID)
+
+	reply, err = pi.Prompt(ctx, "You just completed a task but your response contained no text for the user. Please briefly summarize what you did or respond to the user's message.")
+	if err != nil {
+		slog.Error("re-prompt after empty response failed", "conversation", conversationID, "error", err)
+
+		return "(I completed some actions but failed to generate a summary.)"
 	}
 
 	if reply == "" {
-		slog.Warn("pi returned empty response, re-prompting for summary", "conversation", msg.ConversationID)
-
-		reply, err = pi.Prompt(ctx, "You just completed a task but your response contained no text for the user. Please briefly summarize what you did or respond to the user's message.")
-		if err != nil {
-			slog.Error("re-prompt after empty response failed", "conversation", msg.ConversationID, "error", err)
-
-			reply = "(I completed some actions but failed to generate a summary.)"
-		}
-
-		if reply == "" {
-			reply = "(empty response)"
-		}
+		return "(empty response)"
 	}
 
-	slog.Info("sending reply", "conversation", msg.ConversationID, "len", len(reply))
-	slog.Debug("outgoing reply content", "conversation", msg.ConversationID, "content", reply)
+	return reply
+}
+
+// sendReplyWithFiles extracts <sendfile> tags, uploads each file, and
+// sends the final text reply.
+func (a *App) sendReplyWithFiles(ctx context.Context, conversationID, reply, replyToID string) {
+	slog.Info("sending reply", "conversation", conversationID, "len", len(reply))
+	slog.Debug("outgoing reply content", "conversation", conversationID, "content", reply)
 
 	cleanReply, filePaths := extractSendFiles(reply)
 
 	var fileSendErrors strings.Builder
 
 	for _, fp := range filePaths {
-		slog.Info("sending file", "conversation", msg.ConversationID, "path", fp)
+		slog.Info("sending file", "conversation", conversationID, "path", fp)
 
-		if err := a.backend.SendFile(ctx, msg.ConversationID, fp); err != nil {
-			slog.Error("failed to send file", "conversation", msg.ConversationID, "path", fp, "error", err)
+		if err := a.backend.SendFile(ctx, conversationID, fp); err != nil {
+			slog.Error("failed to send file", "conversation", conversationID, "path", fp, "error", err)
 			fileSendErrors.WriteString(fmt.Sprintf("\n\n(failed to send file %s: %v)", filepath.Base(fp), err))
 		}
 	}
@@ -172,8 +201,8 @@ func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
 	cleanReply += fileSendErrors.String()
 
 	if cleanReply != "" {
-		sentID := a.backend.SendMessage(ctx, msg.ConversationID, cleanReply, msg.ReplyToID)
-		a.sent.Put(msg.ConversationID, sentID, cleanReply)
+		sentID := a.backend.SendMessage(ctx, conversationID, cleanReply, replyToID)
+		a.sent.Put(conversationID, sentID, cleanReply)
 	}
 }
 
