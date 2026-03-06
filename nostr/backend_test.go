@@ -550,6 +550,43 @@ func TestSendReaction_DisallowedUserNoReaction(t *testing.T) {
 	}
 }
 
+func TestRun_ReplyThreadingPrependsMarker(t *testing.T) {
+	t.Parallel()
+
+	wsURL, cleanup := testutil.StartTestRelay(t)
+	defer cleanup()
+
+	botSK := gonostr.Generate()
+	senderSK := gonostr.Generate()
+
+	c := &messageCollector{}
+	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, c.handler)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	runErr := runBackendAsync(ctx, b)
+	time.Sleep(300 * time.Millisecond)
+
+	// Send a DM with an "e" tag (simulating a reply).
+	sendTestDMWithTags(ctx, t, wsURL, senderSK, b.keys.PK, "this is a reply",
+		gonostr.Tags{{"e", "original123"}})
+	waitForMessages(t, c, 1)
+
+	cancel()
+	<-runErr
+
+	msgs := c.get()
+	if len(msgs) != 1 {
+		t.Fatalf("received %d messages, want 1", len(msgs))
+	}
+
+	want := "[nostr:reply-to:original123]\nthis is a reply"
+	if msgs[0].Text != want {
+		t.Errorf("Text = %q, want %q", msgs[0].Text, want)
+	}
+}
+
 // --- test helpers ---
 
 // messageCollector collects backend messages in a thread-safe way.
@@ -688,6 +725,30 @@ func publishDMRelayListEvent(t *testing.T, publishRelay string, sk gonostr.Secre
 	}
 	if err := r.Publish(ctx, evt); err != nil {
 		t.Fatalf("publishing DM relay list: %v", err)
+	}
+}
+
+// sendTestDMWithTags sends a NIP-17 gift-wrapped DM with extra tags on the rumor.
+func sendTestDMWithTags(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, content string, extraTags gonostr.Tags) {
+	t.Helper()
+
+	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	defer pool.Close("test done")
+
+	kr := keyer.NewPlainKeySigner(senderSK)
+
+	_, toThem, err := nip17.PrepareMessage(ctx, content, extraTags, kr, recipientPK, nil)
+	if err != nil {
+		t.Fatalf("preparing DM with tags: %v", err)
+	}
+
+	relay, err := pool.EnsureRelay(wsURL)
+	if err != nil {
+		t.Fatalf("connecting to relay: %v", err)
+	}
+
+	if err := relay.Publish(ctx, toThem); err != nil {
+		t.Fatalf("publishing gift wrap: %v", err)
 	}
 }
 

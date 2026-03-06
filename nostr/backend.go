@@ -374,7 +374,12 @@ in your response with the absolute path to the file:
 <sendfile>/path/to/file.png</sendfile>
 
 The bot will upload the file to a Blossom server and send the URL in a DM.
-You can include multiple <sendfile> tags in a single response.`
+You can include multiple <sendfile> tags in a single response.
+
+## Reply threading
+
+When a user replies to a specific message in their Nostr client, the incoming
+message is prefixed with a [nostr:reply-to:<event-id>] marker.`
 
 	if len(b.cfg.BlossomServers) > 0 {
 		extra += fmt.Sprintf("\n\nBlossom servers: %v", b.cfg.BlossomServers)
@@ -553,6 +558,11 @@ func (b *Backend) processGiftWrap(ctx context.Context, evt *gonostr.Event) {
 
 	text := b.rewriteMediaURLs(ctx, rumor.Content, senderHex)
 
+	// If the rumor has an "e" tag, the user is replying to a previous message.
+	if replyID := rumorReplyTarget(rumor); replyID != "" {
+		text = fmt.Sprintf("[nostr:reply-to:%s]\n%s", replyID, text)
+	}
+
 	b.handler(ctx, backend.Message{
 		ConversationID: senderHex,
 		SenderID:       senderHex,
@@ -659,4 +669,16 @@ func (b *Backend) rewriteMediaURLs(ctx context.Context, text, conversationID str
 	}
 
 	return text
+}
+
+// rumorReplyTarget returns the value of the first "e" tag in the rumor, or ""
+// if none is present. An "e" tag indicates the user is replying to a specific
+// previous message in their Nostr client.
+func rumorReplyTarget(rumor gonostr.Event) string {
+	for _, tag := range rumor.Tags {
+		if len(tag) >= 2 && tag[0] == "e" {
+			return tag[1]
+		}
+	}
+	return ""
 }
