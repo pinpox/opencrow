@@ -239,7 +239,7 @@ func ensureFIFO(path string) error {
 		return fmt.Errorf("checking FIFO at %s: %w", path, err)
 	}
 
-	if err := syscall.Mkfifo(path, 0o644); err != nil {
+	if err := syscall.Mkfifo(path, 0o664); err != nil {
 		return fmt.Errorf("creating FIFO at %s: %w", path, err)
 	}
 
