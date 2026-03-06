@@ -206,13 +206,9 @@ func (b *Backend) SendMessage(ctx context.Context, conversationID string, text s
 	}
 
 	if b.kr == nil {
-		// Pool not started yet — create a temporary keyer and pool
-		pool := gonostr.NewPool(gonostr.PoolOptions{})
-		defer pool.Close("temporary pool done")
+		slog.Error("nostr: SendMessage called before Run()", "recipient", conversationID)
 
-		kr := keyer.NewPlainKeySigner(b.keys.SK)
-
-		return b.sendDM(ctx, kr, pool, recipientPK, text, extraTags)
+		return ""
 	}
 
 	return b.sendDM(ctx, b.kr, b.pool, recipientPK, text, extraTags)
