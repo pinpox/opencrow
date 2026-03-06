@@ -79,6 +79,11 @@ func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 
 	ttl := 7 * 24 * time.Hour // 7 days — covers NIP-59 randomization window with margin
 
+	pq, err := newPublishQueue(cfg.SessionBaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("loading publish queue: %w", err)
+	}
+
 	return &Backend{
 		keys:         keys,
 		cfg:          cfg,
@@ -86,7 +91,7 @@ func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 		seenGiftWrap: make(map[gonostr.ID]time.Time),
 		seenRumors:   loadSeenRumors(cfg.SessionBaseDir, ttl),
 		seenTTL:      ttl,
-		pubQueue:     newPublishQueue(cfg.SessionBaseDir),
+		pubQueue:     pq,
 	}, nil
 }
 

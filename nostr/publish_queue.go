@@ -89,14 +89,17 @@ func (q *publishQueue) Flush(ctx context.Context) {
 	}
 }
 
-func newPublishQueue(dataDir string) *publishQueue {
+func newPublishQueue(dataDir string) (*publishQueue, error) {
 	q := &publishQueue{
 		dataDir: dataDir,
 		wake:    make(chan struct{}, 1),
 	}
-	q.load()
 
-	return q
+	if err := q.load(); err != nil {
+		return nil, err
+	}
+
+	return q, nil
 }
 
 // setPool sets the relay pool used for publishing. Must be called before run.
@@ -341,26 +344,23 @@ func (q *publishQueue) run(ctx context.Context) {
 
 // --- persistence ---
 
-func (q *publishQueue) load() {
+func (q *publishQueue) load() error {
 	if q.dataDir == "" {
-		return
+		return nil
 	}
 
 	data, err := os.ReadFile(filepath.Join(q.dataDir, publishQueueFile))
 	if os.IsNotExist(err) {
-		return
+		return nil
 	}
 
 	if err != nil {
-		slog.Error("nostr: failed to read publish queue, refusing to start with potentially lost data", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("reading publish queue: %w", err)
 	}
 
 	var items []*publishItem
 	if err := json.Unmarshal(data, &items); err != nil {
-		slog.Warn("nostr: failed to parse publish queue", "error", err)
-
-		return
+		return fmt.Errorf("parsing publish queue: %w", err)
 	}
 
 	// Only load items that are not yet delivered (need persistent retry).
@@ -373,6 +373,8 @@ func (q *publishQueue) load() {
 	if len(q.items) > 0 {
 		slog.Info("nostr: loaded publish queue from disk", "items", len(q.items))
 	}
+
+	return nil
 }
 
 // saveLocked persists only undelivered items to disk. Items that have been

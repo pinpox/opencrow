@@ -23,7 +23,7 @@ func TestPublishQueue_EnqueueAndDrain(t *testing.T) {
 	pool := gonostr.NewPool(gonostr.PoolOptions{})
 	defer pool.Close("test done")
 
-	q := newPublishQueue(t.TempDir())
+	q := mustNewPublishQueue(t, t.TempDir())
 	q.setPool(pool)
 
 	evt := signTestEvent(t)
@@ -74,7 +74,7 @@ func TestPublishQueue_PartialSuccess_DeliveredNotPersisted(t *testing.T) {
 	defer pool.Close("test done")
 
 	dir := t.TempDir()
-	q := newPublishQueue(dir)
+	q := mustNewPublishQueue(t, dir)
 	q.setPool(pool)
 
 	evt := signTestEvent(t)
@@ -122,7 +122,7 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	// First "run": enqueue to an unreachable relay, drain fails, persists.
 	pool1 := gonostr.NewPool(gonostr.PoolOptions{})
 
-	q1 := newPublishQueue(dir)
+	q1 := mustNewPublishQueue(t, dir)
 	q1.setPool(pool1)
 	q1.enqueue(evt, []string{unreachableRelay}, "test")
 	q1.drainOnce(context.Background())
@@ -134,7 +134,7 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	pool1.Close("first run done")
 
 	// Second "run": load from disk, verify the item survived.
-	q2 := newPublishQueue(dir)
+	q2 := mustNewPublishQueue(t, dir)
 
 	if q2.Len() != 1 {
 		t.Fatalf("q2 length after reload = %d, want 1", q2.Len())
@@ -177,6 +177,17 @@ func TestPublishQueue_BackoffCapsAtMax(t *testing.T) {
 }
 
 // signTestEvent creates and signs a minimal kind 0 event for testing.
+func mustNewPublishQueue(t *testing.T, dataDir string) *publishQueue {
+	t.Helper()
+
+	q, err := newPublishQueue(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return q
+}
+
 func signTestEvent(t *testing.T) gonostr.Event {
 	t.Helper()
 
