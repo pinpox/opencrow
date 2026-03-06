@@ -202,28 +202,7 @@ func (p *PiProcess) Prompt(ctx context.Context, message string, onToolCall ...fu
 
 	p.lastUse = time.Now()
 
-	if !p.IsAlive() {
-		return "", errors.New("pi process is not alive")
-	}
-
-	if err := p.sendPromptCommand(message); err != nil {
-		return "", err
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	p.cancelMu.Lock()
-	p.cancelFunc = cancel
-	p.cancelMu.Unlock()
-
-	defer func() {
-		p.cancelMu.Lock()
-		p.cancelFunc = nil
-		p.cancelMu.Unlock()
-	}()
-
-	return p.waitForResult(ctx)
+	return p.sendAndWait(ctx, message)
 }
 
 // PromptNoTouch is like Prompt but does not update lastUse.
@@ -244,28 +223,7 @@ func (p *PiProcess) PromptNoTouch(ctx context.Context, message string, onToolCal
 		defer func() { p.onToolCall = savedToolCall }()
 	}
 
-	if !p.IsAlive() {
-		return "", errors.New("pi process is not alive")
-	}
-
-	if err := p.sendPromptCommand(message); err != nil {
-		return "", err
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	p.cancelMu.Lock()
-	p.cancelFunc = cancel
-	p.cancelMu.Unlock()
-
-	defer func() {
-		p.cancelMu.Lock()
-		p.cancelFunc = nil
-		p.cancelMu.Unlock()
-	}()
-
-	return p.waitForResult(ctx)
+	return p.sendAndWait(ctx, message)
 }
 
 // Abort cancels the currently running prompt, if any.
@@ -316,6 +274,33 @@ func (p *PiProcess) IsAlive() bool {
 // LastUse returns the time of the last prompt.
 func (p *PiProcess) LastUse() time.Time {
 	return p.lastUse
+}
+
+// sendAndWait sends a prompt command and waits for the agent to finish.
+// Must be called with p.mu held.
+func (p *PiProcess) sendAndWait(ctx context.Context, message string) (string, error) {
+	if !p.IsAlive() {
+		return "", errors.New("pi process is not alive")
+	}
+
+	if err := p.sendPromptCommand(message); err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	p.cancelMu.Lock()
+	p.cancelFunc = cancel
+	p.cancelMu.Unlock()
+
+	defer func() {
+		p.cancelMu.Lock()
+		p.cancelFunc = nil
+		p.cancelMu.Unlock()
+	}()
+
+	return p.waitForResult(ctx)
 }
 
 func (p *PiProcess) sendPromptCommand(message string) error {
