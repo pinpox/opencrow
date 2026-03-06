@@ -129,16 +129,7 @@ func (h *HeartbeatScheduler) scanSessionDir() []string {
 
 // tick performs a single heartbeat for a room. Returns true if skipped (pi busy).
 func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
-	heartbeatPath := filepath.Join(h.piCfg.SessionDir, "HEARTBEAT.md")
-
-	heartbeatContent, err := os.ReadFile(heartbeatPath)
-	if err != nil && !os.IsNotExist(err) {
-		slog.Warn("failed to read HEARTBEAT.md", "room", roomID, "path", heartbeatPath, "error", err)
-	}
-
-	content := strings.TrimSpace(string(heartbeatContent))
-
-	// If no heartbeat file content, skip
+	content := h.readHeartbeatContent(roomID)
 	if isEffectivelyEmpty(content) {
 		return false
 	}
@@ -154,7 +145,24 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
 
 	prompt := buildHeartbeatPrompt(h.cfg.Prompt, content)
 
-	// Suppress tool call events during heartbeats by passing nil under the lock.
+	return h.executeHeartbeatPrompt(ctx, pi, roomID, prompt)
+}
+
+// readHeartbeatContent reads and trims HEARTBEAT.md for a room.
+func (h *HeartbeatScheduler) readHeartbeatContent(roomID string) string {
+	heartbeatPath := filepath.Join(h.piCfg.SessionDir, "HEARTBEAT.md")
+
+	heartbeatContent, err := os.ReadFile(heartbeatPath)
+	if err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to read HEARTBEAT.md", "room", roomID, "path", heartbeatPath, "error", err)
+	}
+
+	return strings.TrimSpace(string(heartbeatContent))
+}
+
+// executeHeartbeatPrompt sends the heartbeat prompt and handles the reply.
+// Returns true if the heartbeat was skipped (pi busy or aborted).
+func (h *HeartbeatScheduler) executeHeartbeatPrompt(ctx context.Context, pi *PiProcess, roomID, prompt string) bool {
 	reply, err := pi.PromptNoTouch(ctx, prompt, nil)
 	if errors.Is(err, ErrBusy) {
 		slog.Info("heartbeat: skipped, pi process busy with user prompt", "room", roomID)
@@ -163,18 +171,7 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
 	}
 
 	if err != nil {
-		// If the heartbeat was aborted by a user prompt, don't kill the pi process.
-		// Only remove on real failures (process died, etc.).
-		if ctx.Err() != nil || strings.Contains(err.Error(), "context cancel") {
-			slog.Info("heartbeat: aborted by user prompt", "room", roomID)
-
-			return true // skip, don't update lastBeat so we retry
-		}
-
-		slog.Error("heartbeat: pi prompt failed", "room", roomID, "error", err)
-		h.pool.Remove(roomID)
-
-		return false
+		return h.handleHeartbeatError(ctx, roomID, err)
 	}
 
 	if containsHeartbeatOK(reply) {
@@ -190,6 +187,21 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
 	}
 
 	h.sendReply(ctx, roomID, reply)
+
+	return false
+}
+
+// handleHeartbeatError distinguishes user-abort from real failures.
+// Returns true when the heartbeat should be retried later.
+func (h *HeartbeatScheduler) handleHeartbeatError(ctx context.Context, roomID string, err error) bool {
+	if ctx.Err() != nil || strings.Contains(err.Error(), "context cancel") {
+		slog.Info("heartbeat: aborted by user prompt", "room", roomID)
+
+		return true // skip, don't update lastBeat so we retry
+	}
+
+	slog.Error("heartbeat: pi prompt failed", "room", roomID, "error", err)
+	h.pool.Remove(roomID)
 
 	return false
 }
