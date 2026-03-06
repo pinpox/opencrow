@@ -57,8 +57,11 @@ func (s *sentMessageStore) Put(conversationID, messageID, text string) {
 		s.store[conversationID] = cm
 	}
 
+	if _, exists := cm.ByID[messageID]; !exists {
+		cm.Order = append(cm.Order, messageID)
+	}
+
 	cm.ByID[messageID] = text
-	cm.Order = append(cm.Order, messageID)
 
 	for len(cm.Order) > maxSentMessagesPerConversation {
 		oldest := cm.Order[0]

@@ -73,6 +73,33 @@ func TestSentMessageStore_Eviction(t *testing.T) {
 	}
 }
 
+func TestSentMessageStore_DuplicatePutNoCorruption(t *testing.T) {
+	t.Parallel()
+
+	s := newSentMessageStore(t.TempDir())
+
+	// Insert max entries, then overwrite the first one. This must not
+	// create a duplicate in Order, which would break eviction.
+	for i := range maxSentMessagesPerConversation {
+		s.Put("room1", fmt.Sprintf("msg%d", i), fmt.Sprintf("text%d", i))
+	}
+
+	// Overwrite msg0 with new text — should update value, not grow Order.
+	s.Put("room1", "msg0", "updated")
+
+	if got := s.Get("room1", "msg0"); got != "updated" {
+		t.Errorf("Get(room1, msg0) = %q, want %q", got, "updated")
+	}
+
+	// Add one more entry. If Order had a duplicate msg0, two entries
+	// would be evicted and msg1 would disappear.
+	s.Put("room1", "new", "new-text")
+
+	if got := s.Get("room1", "msg1"); got != "text1" {
+		t.Errorf("msg1 should survive, got %q", got)
+	}
+}
+
 func TestSentMessageStore_Persistence(t *testing.T) {
 	t.Parallel()
 
