@@ -17,6 +17,7 @@ buildGoModule {
     ];
   };
   vendorHash = "sha256-WZ70HW3c4iGg5hpfYdIenKBaPFni7IwPhizakXhzj9Q=";
+  subPackages = [ "." ];
   tags = [ "goolm" ];
 
   # buildGoModule only passes `tags` to `go install`, not to GOFLAGS,
