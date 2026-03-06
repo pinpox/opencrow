@@ -849,13 +849,9 @@ func decryptAESGCM(key, nonce, ciphertext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("creating AES cipher: %w", err)
 	}
 
-	gcm, err := cipher.NewGCM(block)
+	gcm, err := cipher.NewGCMWithNonceSize(block, len(nonce))
 	if err != nil {
 		return nil, fmt.Errorf("creating GCM: %w", err)
-	}
-
-	if len(nonce) != gcm.NonceSize() {
-		return nil, fmt.Errorf("nonce length %d, want %d", len(nonce), gcm.NonceSize())
 	}
 
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
