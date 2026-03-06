@@ -431,7 +431,24 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 	cancel()
 	<-runErr
 
-	// Fetch all gift wraps from the relay and find the reaction.
+	rumor := fetchReactionRumor(t, wsURL, senderSK)
+
+	if rumor.Content != "👍" {
+		t.Errorf("reaction content = %q, want %q", rumor.Content, "👍")
+	}
+
+	if rumor.PubKey != botSK.Public() {
+		t.Errorf("reaction pubkey = %s, want %s", rumor.PubKey, botSK.Public())
+	}
+
+	verifyReactionTags(t, rumor, senderSK.Public().Hex())
+}
+
+// fetchReactionRumor unwraps gift wraps from the relay and returns the first
+// reaction rumor addressed to senderSK. Fails the test if none is found.
+func fetchReactionRumor(t *testing.T, wsURL string, senderSK gonostr.SecretKey) gonostr.Event {
+	t.Helper()
+
 	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer fetchCancel()
 
@@ -444,8 +461,6 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 
 	senderKr := keyer.NewPlainKeySigner(senderSK)
 
-	var foundReaction bool
-
 	for ie := range events {
 		rumor, err := nip59.GiftUnwrap(ie.Event,
 			func(otherpubkey gonostr.PubKey, ciphertext string) (string, error) {
@@ -456,62 +471,41 @@ func TestSendReaction_PublishesGiftWrappedReaction(t *testing.T) {
 			continue
 		}
 
-		if rumor.Kind != gonostr.KindReaction {
-			continue
+		if rumor.Kind == gonostr.KindReaction {
+			return rumor
 		}
+	}
 
-		foundReaction = true
+	t.Fatal("no reaction gift wrap found on relay")
 
-		if rumor.Content != "👍" {
-			t.Errorf("reaction content = %q, want %q", rumor.Content, "👍")
-		}
+	return gonostr.Event{} // unreachable
+}
 
-		if rumor.PubKey != botSK.Public() {
-			t.Errorf("reaction pubkey = %s, want %s", rumor.PubKey, botSK.Public())
-		}
+// verifyReactionTags checks that a reaction rumor contains the expected e, p, and k tags.
+func verifyReactionTags(t *testing.T, rumor gonostr.Event, expectedPubkeyHex string) {
+	t.Helper()
 
-		// Verify e tag references the original DM rumor.
-		var hasETag, hasPTag, hasKTag bool
+	requireTag(t, rumor.Tags, "e", "")
+	requireTag(t, rumor.Tags, "p", expectedPubkeyHex)
+	requireTag(t, rumor.Tags, "k", "14")
+}
 
-		for _, tag := range rumor.Tags {
-			if len(tag) >= 2 {
-				switch tag[0] {
-				case "e":
-					hasETag = true
-				case "p":
-					if tag[1] == senderSK.Public().Hex() {
-						hasPTag = true
-					} else {
-						t.Errorf("p tag = %q, want %q", tag[1], senderSK.Public().Hex())
-					}
-				case "k":
-					if tag[1] == "14" {
-						hasKTag = true
-					} else {
-						t.Errorf("k tag = %q, want %q", tag[1], "14")
-					}
-				}
+// requireTag asserts that tags contain a tag with the given key.
+// If wantValue is non-empty the tag's value must also match.
+func requireTag(t *testing.T, tags gonostr.Tags, key, wantValue string) {
+	t.Helper()
+
+	for _, tag := range tags {
+		if len(tag) >= 2 && tag[0] == key {
+			if wantValue != "" && tag[1] != wantValue {
+				t.Errorf("%s tag = %q, want %q", key, tag[1], wantValue)
 			}
-		}
 
-		if !hasETag {
-			t.Error("reaction missing e tag")
+			return
 		}
-
-		if !hasPTag {
-			t.Error("reaction missing p tag")
-		}
-
-		if !hasKTag {
-			t.Error("reaction missing k tag")
-		}
-
-		break
 	}
 
-	if !foundReaction {
-		t.Fatal("no reaction gift wrap found on relay")
-	}
+	t.Errorf("reaction missing %s tag", key)
 }
 
 func TestSendReaction_DisallowedUserNoReaction(t *testing.T) {
