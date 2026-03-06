@@ -125,6 +125,34 @@ func TestApp_Skills(t *testing.T) {
 	}
 }
 
+func TestApp_BuildPromptText_ReplyToUserMessage(t *testing.T) {
+	t.Parallel()
+
+	mb := &mockBackend{}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil, t.TempDir())
+
+	// Record a user message as HandleMessage would.
+	app.sent.Put("conv1", "user-msg-123", "original question")
+
+	// Now simulate the user replying to their own message.
+	replyMsg := backend.Message{
+		ConversationID: "conv1",
+		SenderID:       "user1",
+		Text:           "follow-up",
+		MessageID:      "user-msg-456",
+		ReplyToID:      "user-msg-123",
+	}
+
+	got := app.buildPromptText(replyMsg)
+	want := `[user replied to your message: "original question"]
+follow-up`
+
+	if got != want {
+		t.Errorf("buildPromptText = %q, want %q", got, want)
+	}
+}
+
 func TestApp_SystemPrompt(t *testing.T) {
 	t.Parallel()
 

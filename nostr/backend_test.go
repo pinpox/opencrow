@@ -149,6 +149,10 @@ func TestRun_ReceivesDM(t *testing.T) {
 	if msgs[0].Text != "hello bot" {
 		t.Errorf("Text = %q, want %q", msgs[0].Text, "hello bot")
 	}
+
+	if msgs[0].MessageID == "" {
+		t.Error("MessageID is empty, want non-empty rumor ID")
+	}
 }
 
 func TestRun_DropsDisallowedUser(t *testing.T) {
@@ -620,6 +624,10 @@ func TestRun_ReplyThreadingSetsReplyToID(t *testing.T) {
 
 	if msgs[0].Text != "this is a reply" {
 		t.Errorf("Text = %q, want %q", msgs[0].Text, "this is a reply")
+	}
+
+	if msgs[0].MessageID == "" {
+		t.Error("MessageID is empty, want non-empty rumor ID")
 	}
 
 	if msgs[0].ReplyToID != "original123" {

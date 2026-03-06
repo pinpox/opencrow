@@ -614,6 +614,7 @@ func (b *Backend) processGiftWrap(ctx context.Context, evt *gonostr.Event) {
 		ConversationID: senderHex,
 		SenderID:       senderHex,
 		Text:           text,
+		MessageID:      rumor.ID.Hex(),
 		ReplyToID:      rumorReplyTarget(rumor),
 	})
 }

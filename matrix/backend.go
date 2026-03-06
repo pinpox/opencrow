@@ -504,6 +504,7 @@ func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
 		ConversationID: roomID,
 		SenderID:       string(evt.Sender),
 		Text:           text,
+		MessageID:      string(evt.ID),
 		ReplyToID:      replyToID,
 	})
 }

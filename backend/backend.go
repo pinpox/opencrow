@@ -38,6 +38,7 @@ type Message struct {
 	ConversationID string // room ID, DM pubkey, channel ID — opaque to the core
 	SenderID       string // user ID / pubkey
 	Text           string // message text (or synthesized "[User sent file: ...]")
+	MessageID      string // backend-specific ID of this message (used to resolve future reply-to references)
 	ReplyToID      string // backend-specific ID of the message being replied to (empty if not a reply)
 }
 
