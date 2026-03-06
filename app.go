@@ -81,6 +81,7 @@ func (a *App) handleStop(ctx context.Context, msg backend.Message) {
 	pi, err := a.pool.Get(ctx, msg.ConversationID)
 	if err != nil {
 		a.backend.SendMessage(ctx, msg.ConversationID, "No active session.", "")
+
 		return
 	}
 
@@ -204,7 +205,7 @@ func formatToolCall(evt ToolCallEvent) string {
 
 		return "📝 writing file"
 	default:
-		return fmt.Sprintf("🔧 %s", evt.ToolName)
+		return "🔧 " + evt.ToolName
 	}
 }
 

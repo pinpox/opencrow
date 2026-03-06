@@ -24,7 +24,7 @@ var ErrBusy = errors.New("pi process is busy")
 // ToolCallEvent contains information about a tool invocation relayed from pi.
 type ToolCallEvent struct {
 	ToolName string
-	Args     map[string]interface{}
+	Args     map[string]any
 }
 
 // PiProcess manages a single pi --mode rpc subprocess.
@@ -164,8 +164,8 @@ type rpcEvent struct {
 	Method string `json:"method,omitempty"`
 
 	// tool_execution_start fields
-	ToolName string                 `json:"toolName,omitempty"`
-	Args     map[string]interface{} `json:"args,omitempty"`
+	ToolName string         `json:"toolName,omitempty"`
+	Args     map[string]any `json:"args,omitempty"`
 }
 
 // agentMessage represents a message in an agent_end event.
@@ -240,6 +240,7 @@ func (p *PiProcess) PromptNoTouch(ctx context.Context, message string, onToolCal
 	if len(onToolCall) > 0 {
 		savedToolCall := p.onToolCall
 		p.onToolCall = onToolCall[0]
+
 		defer func() { p.onToolCall = savedToolCall }()
 	}
 
@@ -276,6 +277,7 @@ func (p *PiProcess) Abort() bool {
 
 	if cancel != nil {
 		cancel()
+
 		return true
 	}
 

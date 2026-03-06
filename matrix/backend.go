@@ -493,6 +493,7 @@ func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	var replyToID string
+
 	if msg.RelatesTo != nil {
 		if replyTo := msg.RelatesTo.GetReplyTo(); replyTo != "" {
 			replyToID = string(replyTo)
