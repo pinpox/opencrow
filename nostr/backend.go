@@ -103,6 +103,8 @@ func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 }
 
 // Run starts the Nostr event loop — subscribes to kind 1059 gift wraps.
+//
+//nolint:contextcheck // publish queue intentionally uses a non-inherited context
 func (b *Backend) Run(ctx context.Context) error {
 	b.pool = gonostr.NewPool(gonostr.PoolOptions{
 		AuthRequiredHandler: func(_ context.Context, evt *gonostr.Event) error {
@@ -170,25 +172,7 @@ func (b *Backend) Run(ctx context.Context) error {
 		b.processGiftWrap(ctx, &evt)
 	}
 
-	// Wait for in-flight background goroutines (reactions) to finish
-	// enqueueing before stopping the publish queue. Without this,
-	// a reaction goroutine can write to the data directory after Run
-	// returns, racing with cleanup of the session directory.
-	b.wg.Wait()
-
-	// Now cancel the publish queue's context so its drain loop exits
-	// after processing any final items enqueued by the reactions above.
-	pubCancel()
-
-	// Wait for the publish queue goroutine to finish so it doesn't
-	// write to the data directory after Run returns.
-	<-pubDone
-
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("nostr event loop: %w", err)
-	}
-
-	return nil
+	return b.drainAndShutdown(ctx, pubCancel, pubDone)
 }
 
 // Stop signals the backend to shut down.
@@ -280,6 +264,30 @@ You can include multiple <sendfile> tags in a single response.`
 }
 
 // --- unexported methods ---
+
+// drainAndShutdown waits for in-flight reaction goroutines, then stops the
+// publish queue and waits for it to finish writing.
+func (b *Backend) drainAndShutdown(ctx context.Context, pubCancel context.CancelFunc, pubDone <-chan struct{}) error {
+	// Wait for in-flight background goroutines (reactions) to finish
+	// enqueueing before stopping the publish queue. Without this,
+	// a reaction goroutine can write to the data directory after Run
+	// returns, racing with cleanup of the session directory.
+	b.wg.Wait()
+
+	// Now cancel the publish queue's context so its drain loop exits
+	// after processing any final items enqueued by the reactions above.
+	pubCancel()
+
+	// Wait for the publish queue goroutine to finish so it doesn't
+	// write to the data directory after Run returns.
+	<-pubDone
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("nostr event loop: %w", err)
+	}
+
+	return nil
+}
 
 // discoverSubscriptionRelays returns the full set of relays to subscribe on:
 // the bot's configured relays, its DM relays, plus the DM relay lists of all
@@ -626,12 +634,9 @@ func (b *Backend) processGiftWrap(ctx context.Context, evt *gonostr.Event) {
 	slog.Info("nostr: received DM", "sender", senderHex, "kind", rumor.Kind, "len", len(rumor.Content), "tags", len(rumor.Tags))
 
 	// Send a 👍 reaction to acknowledge receipt before processing.
-	b.wg.Add(1)
-
-	go func() {
-		defer b.wg.Done()
+	b.wg.Go(func() {
 		b.sendReaction(ctx, rumor.ID, rumor.PubKey)
-	}()
+	})
 
 	var text string
 
