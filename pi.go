@@ -18,15 +18,29 @@ import (
 
 const scannerBufSize = 1 << 20 // 1 MB
 
+// ErrBusy is returned by PromptNoTouch when another prompt is already running.
+var ErrBusy = errors.New("pi process is busy")
+
+// ToolCallEvent contains information about a tool invocation relayed from pi.
+type ToolCallEvent struct {
+	ToolName string
+	Args     map[string]interface{}
+}
+
 // PiProcess manages a single pi --mode rpc subprocess.
 type PiProcess struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  *bufio.Scanner
-	done    chan struct{}
-	mu      sync.Mutex
-	lastUse time.Time
-	roomID  string
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdout     *bufio.Scanner
+	done       chan struct{}
+	mu         sync.Mutex
+	lastUse    time.Time
+	roomID     string
+	onToolCall func(ToolCallEvent) // optional callback for tool_execution_start events
+
+	// cancelMu protects cancelFunc for concurrent access from Abort().
+	cancelMu   sync.Mutex
+	cancelFunc context.CancelFunc
 }
 
 // StartPi spawns a pi --mode rpc subprocess for the given room.
@@ -148,6 +162,10 @@ type rpcEvent struct {
 
 	// extension_ui_request fields
 	Method string `json:"method,omitempty"`
+
+	// tool_execution_start fields
+	ToolName string                 `json:"toolName,omitempty"`
+	Args     map[string]interface{} `json:"args,omitempty"`
 }
 
 // agentMessage represents a message in an agent_end event.
@@ -164,9 +182,23 @@ type contentBlock struct {
 
 // Prompt sends a message to the pi process and waits for the agent to complete.
 // Returns the assistant's text response.
-func (p *PiProcess) Prompt(ctx context.Context, message string) (string, error) {
-	p.mu.Lock()
+func (p *PiProcess) Prompt(ctx context.Context, message string, onToolCall ...func(ToolCallEvent)) (string, error) {
+	// If lock is held (likely by a heartbeat), abort it so user messages
+	// always take priority. The heartbeat will retry on the next tick.
+	if !p.mu.TryLock() {
+		slog.Info("prompt: lock contended, aborting running operation", "room", p.roomID)
+		p.Abort()
+		p.mu.Lock()
+	}
 	defer p.mu.Unlock()
+
+	// Set tool call callback under lock to avoid racing with heartbeat suppression.
+	// Always overwrite to prevent stale callbacks from prior prompts.
+	if len(onToolCall) > 0 {
+		p.onToolCall = onToolCall[0]
+	} else {
+		p.onToolCall = nil
+	}
 
 	p.lastUse = time.Now()
 
@@ -178,14 +210,38 @@ func (p *PiProcess) Prompt(ctx context.Context, message string) (string, error) 
 		return "", err
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	p.cancelMu.Lock()
+	p.cancelFunc = cancel
+	p.cancelMu.Unlock()
+
+	defer func() {
+		p.cancelMu.Lock()
+		p.cancelFunc = nil
+		p.cancelMu.Unlock()
+	}()
+
 	return p.waitForResult(ctx)
 }
 
 // PromptNoTouch is like Prompt but does not update lastUse.
 // Used for heartbeat prompts so idle reaping still works.
-func (p *PiProcess) PromptNoTouch(ctx context.Context, message string) (string, error) {
-	p.mu.Lock()
+// Skips if another prompt is currently running (returns ErrBusy).
+// An optional onToolCall callback overrides the current callback for this call.
+func (p *PiProcess) PromptNoTouch(ctx context.Context, message string, onToolCall ...func(ToolCallEvent)) (string, error) {
+	if !p.mu.TryLock() {
+		return "", ErrBusy
+	}
 	defer p.mu.Unlock()
+
+	// Override tool-call callback under lock if caller requested suppression.
+	if len(onToolCall) > 0 {
+		savedToolCall := p.onToolCall
+		p.onToolCall = onToolCall[0]
+		defer func() { p.onToolCall = savedToolCall }()
+	}
 
 	if !p.IsAlive() {
 		return "", errors.New("pi process is not alive")
@@ -195,7 +251,35 @@ func (p *PiProcess) PromptNoTouch(ctx context.Context, message string) (string, 
 		return "", err
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	p.cancelMu.Lock()
+	p.cancelFunc = cancel
+	p.cancelMu.Unlock()
+
+	defer func() {
+		p.cancelMu.Lock()
+		p.cancelFunc = nil
+		p.cancelMu.Unlock()
+	}()
+
 	return p.waitForResult(ctx)
+}
+
+// Abort cancels the currently running prompt, if any.
+// Safe to call concurrently from another goroutine (e.g. !stop handler).
+func (p *PiProcess) Abort() bool {
+	p.cancelMu.Lock()
+	cancel := p.cancelFunc
+	p.cancelMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		return true
+	}
+
+	return false
 }
 
 // Kill terminates the pi process.
@@ -339,6 +423,14 @@ func (p *PiProcess) handleRPCLine(line string) (string, bool, error) {
 		}
 
 		return text, true, nil
+
+	case "tool_execution_start":
+		if p.onToolCall != nil {
+			p.onToolCall(ToolCallEvent{
+				ToolName: evt.ToolName,
+				Args:     evt.Args,
+			})
+		}
 
 	case "extension_ui_request":
 		p.autoRespondExtensionUI(evt)

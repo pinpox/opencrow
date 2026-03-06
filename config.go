@@ -54,14 +54,15 @@ type NostrConfig struct {
 }
 
 type PiConfig struct {
-	BinaryPath   string
-	SessionDir   string
-	Provider     string
-	Model        string
-	WorkingDir   string
-	IdleTimeout  time.Duration
-	SystemPrompt string
-	Skills       []string
+	BinaryPath    string
+	SessionDir    string
+	Provider      string
+	Model         string
+	WorkingDir    string
+	IdleTimeout   time.Duration
+	SystemPrompt  string
+	Skills        []string
+	ShowToolCalls bool // OPENCROW_SHOW_TOOL_CALLS — relay tool_execution_start events to chat
 }
 
 // LoadConfig reads configuration from os.Getenv.
@@ -108,14 +109,15 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 			CryptoDBPath: env.or("OPENCROW_MATRIX_CRYPTO_DB", filepath.Join(workingDir, "crypto.db")),
 		},
 		Pi: PiConfig{
-			BinaryPath:   env.or("OPENCROW_PI_BINARY", "pi"),
-			SessionDir:   env.or("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
-			Provider:     env.or("OPENCROW_PI_PROVIDER", "anthropic"),
-			Model:        env.or("OPENCROW_PI_MODEL", "claude-opus-4-6"),
-			WorkingDir:   workingDir,
-			IdleTimeout:  idleTimeout,
-			SystemPrompt: loadSoul(getenv),
-			Skills:       skills,
+			BinaryPath:    env.or("OPENCROW_PI_BINARY", "pi"),
+			SessionDir:    env.or("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
+			Provider:      env.or("OPENCROW_PI_PROVIDER", "anthropic"),
+			Model:         env.or("OPENCROW_PI_MODEL", "claude-opus-4-6"),
+			WorkingDir:    workingDir,
+			IdleTimeout:   idleTimeout,
+			SystemPrompt:  loadSoul(getenv),
+			Skills:        skills,
+			ShowToolCalls: parseBool(getenv("OPENCROW_SHOW_TOOL_CALLS")),
 		},
 		Heartbeat: HeartbeatConfig{
 			Interval: heartbeatInterval,
@@ -402,6 +404,15 @@ func parseNostrAllowedUsers(s string) (map[string]struct{}, error) {
 	}
 
 	return users, nil
+}
+
+func parseBool(s string) bool {
+	switch strings.ToLower(s) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseCommaSeparated(s string) []string {

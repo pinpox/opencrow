@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -92,11 +93,13 @@ func (h *HeartbeatScheduler) tickAll(ctx context.Context) {
 		h.mu.Unlock()
 
 		if due {
-			h.tick(ctx, roomID)
+			skipped := h.tick(ctx, roomID)
 
-			h.mu.Lock()
-			h.lastBeat[roomID] = now
-			h.mu.Unlock()
+			if !skipped {
+				h.mu.Lock()
+				h.lastBeat[roomID] = now
+				h.mu.Unlock()
+			}
 		}
 	}
 }
@@ -124,8 +127,8 @@ func (h *HeartbeatScheduler) scanSessionDir() []string {
 	return nil
 }
 
-// tick performs a single heartbeat for a room.
-func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) {
+// tick performs a single heartbeat for a room. Returns true if skipped (pi busy).
+func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
 	heartbeatPath := filepath.Join(h.piCfg.SessionDir, "HEARTBEAT.md")
 
 	heartbeatContent, err := os.ReadFile(heartbeatPath)
@@ -137,7 +140,7 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) {
 
 	// If no heartbeat file content, skip
 	if isEffectivelyEmpty(content) {
-		return
+		return false
 	}
 
 	slog.Info("heartbeat firing", "room", roomID)
@@ -146,32 +149,49 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) {
 	if err != nil {
 		slog.Error("heartbeat: failed to get pi process", "room", roomID, "error", err)
 
-		return
+		return false
 	}
 
 	prompt := buildHeartbeatPrompt(h.cfg.Prompt, content)
 
-	reply, err := pi.PromptNoTouch(ctx, prompt)
+	// Suppress tool call events during heartbeats by passing nil under the lock.
+	reply, err := pi.PromptNoTouch(ctx, prompt, nil)
+	if errors.Is(err, ErrBusy) {
+		slog.Info("heartbeat: skipped, pi process busy with user prompt", "room", roomID)
+
+		return true
+	}
+
 	if err != nil {
+		// If the heartbeat was aborted by a user prompt, don't kill the pi process.
+		// Only remove on real failures (process died, etc.).
+		if ctx.Err() != nil || strings.Contains(err.Error(), "context cancel") {
+			slog.Info("heartbeat: aborted by user prompt", "room", roomID)
+
+			return true // skip, don't update lastBeat so we retry
+		}
+
 		slog.Error("heartbeat: pi prompt failed", "room", roomID, "error", err)
 		h.pool.Remove(roomID)
 
-		return
+		return false
 	}
 
 	if containsHeartbeatOK(reply) {
 		slog.Info("heartbeat: HEARTBEAT_OK, suppressing", "room", roomID)
 
-		return
+		return false
 	}
 
 	if reply == "" {
 		slog.Info("heartbeat: empty response, suppressing", "room", roomID)
 
-		return
+		return false
 	}
 
 	h.sendReply(ctx, roomID, reply)
+
+	return false
 }
 
 func buildHeartbeatPrompt(basePrompt, content string) string {

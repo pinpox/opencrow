@@ -59,6 +59,8 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	switch msg.Text {
 	case "!restart":
 		a.handleRestart(ctx, msg)
+	case "!stop":
+		a.handleStop(ctx, msg)
 	case "!skills":
 		a.handleSkills(ctx, msg)
 	default:
@@ -70,6 +72,20 @@ func (a *App) handleRestart(ctx context.Context, msg backend.Message) {
 	a.backend.ResetConversation(ctx, msg.ConversationID)
 	a.pool.Remove(msg.ConversationID)
 	a.backend.SendMessage(ctx, msg.ConversationID, "Session restarted. Next message will use a fresh process.")
+}
+
+func (a *App) handleStop(ctx context.Context, msg backend.Message) {
+	pi, err := a.pool.Get(ctx, msg.ConversationID)
+	if err != nil {
+		a.backend.SendMessage(ctx, msg.ConversationID, "No active session.")
+		return
+	}
+
+	if pi.Abort() {
+		a.backend.SendMessage(ctx, msg.ConversationID, "Aborted current operation.")
+	} else {
+		a.backend.SendMessage(ctx, msg.ConversationID, "Nothing running to stop.")
+	}
 }
 
 func (a *App) handleSkills(ctx context.Context, msg backend.Message) {
@@ -92,7 +108,15 @@ func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
 		a.triggerMgr.StartRoom(ctx, msg.ConversationID)
 	}
 
-	reply, err := pi.Prompt(ctx, msg.Text)
+	var toolCallFn func(ToolCallEvent)
+	if a.pool.cfg.ShowToolCalls {
+		toolCallFn = func(evt ToolCallEvent) {
+			text := formatToolCall(evt)
+			a.backend.SendMessage(ctx, msg.ConversationID, text)
+		}
+	}
+
+	reply, err := pi.Prompt(ctx, msg.Text, toolCallFn)
 	if err != nil {
 		slog.Error("pi prompt failed", "conversation", msg.ConversationID, "error", err)
 		a.pool.Remove(msg.ConversationID)
@@ -135,6 +159,38 @@ func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
 
 	if cleanReply != "" {
 		a.backend.SendMessage(ctx, msg.ConversationID, cleanReply)
+	}
+}
+
+// formatToolCall produces a short human-readable summary of a tool invocation.
+func formatToolCall(evt ToolCallEvent) string {
+	switch evt.ToolName {
+	case "bash":
+		if cmd, ok := evt.Args["command"].(string); ok {
+			return fmt.Sprintf("🔧 `%s`", cmd)
+		}
+
+		return "🔧 bash"
+	case "read":
+		if p, ok := evt.Args["path"].(string); ok {
+			return fmt.Sprintf("📄 reading `%s`", p)
+		}
+
+		return "📄 reading file"
+	case "edit":
+		if p, ok := evt.Args["path"].(string); ok {
+			return fmt.Sprintf("✏️ editing `%s`", p)
+		}
+
+		return "✏️ editing file"
+	case "write":
+		if p, ok := evt.Args["path"].(string); ok {
+			return fmt.Sprintf("📝 writing `%s`", p)
+		}
+
+		return "📝 writing file"
+	default:
+		return fmt.Sprintf("🔧 %s", evt.ToolName)
 	}
 }
 
