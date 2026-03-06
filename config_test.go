@@ -160,7 +160,7 @@ func TestNostrConfig_DMRelays(t *testing.T) {
 		}
 	})
 
-	t.Run("defaults to Relays", func(t *testing.T) {
+	t.Run("empty when not set", func(t *testing.T) {
 		t.Parallel()
 
 		env := baseNostrEnv()
@@ -170,14 +170,9 @@ func TestNostrConfig_DMRelays(t *testing.T) {
 			t.Fatalf("loadConfig: %v", err)
 		}
 
-		if len(cfg.Nostr.DMRelays) != len(cfg.Nostr.Relays) {
-			t.Fatalf("DMRelays len = %d, want %d (same as Relays)", len(cfg.Nostr.DMRelays), len(cfg.Nostr.Relays))
-		}
-
-		for i, r := range cfg.Nostr.DMRelays {
-			if r != cfg.Nostr.Relays[i] {
-				t.Errorf("DMRelays[%d] = %q, want %q", i, r, cfg.Nostr.Relays[i])
-			}
+		// Config layer passes through nil; NewBackend applies the Relays default.
+		if len(cfg.Nostr.DMRelays) != 0 {
+			t.Fatalf("DMRelays len = %d, want 0 (defaulting is done by NewBackend)", len(cfg.Nostr.DMRelays))
 		}
 	})
 }

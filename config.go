@@ -312,10 +312,6 @@ func loadNostrConfig(getenv func(string) string, sessionBaseDir string) (NostrCo
 	}
 
 	dmRelays := parseCommaSeparated(getenv("OPENCROW_NOSTR_DM_RELAYS"))
-	// If not set, default to Relays for backward compat.
-	if len(dmRelays) == 0 {
-		dmRelays = relays
-	}
 
 	allowedUsers, err := parseNostrAllowedUsers(getenv("OPENCROW_NOSTR_ALLOWED_USERS"))
 	if err != nil {
