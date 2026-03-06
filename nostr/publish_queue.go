@@ -12,6 +12,7 @@ import (
 	"time"
 
 	gonostr "fiatjaf.com/nostr"
+	"github.com/pinpox/opencrow/atomicfile"
 )
 
 const (
@@ -62,20 +63,6 @@ func (q *publishQueue) Len() int {
 	defer q.mu.Unlock()
 
 	return len(q.items)
-}
-
-// PendingRelays returns the total number of relay deliveries still pending.
-func (q *publishQueue) PendingRelays() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	n := 0
-
-	for _, item := range q.items {
-		n += len(item.FailedRelays)
-	}
-
-	return n
 }
 
 // Flush blocks until all currently-enqueued items have had at least one
@@ -382,12 +369,6 @@ func (q *publishQueue) saveLocked() {
 		}
 	}
 
-	if err := os.MkdirAll(q.dataDir, 0o755); err != nil {
-		slog.Warn("nostr: failed to create dir for publish queue", "error", err)
-
-		return
-	}
-
 	data, err := json.Marshal(persistent)
 	if err != nil {
 		slog.Warn("nostr: failed to marshal publish queue", "error", err)
@@ -395,34 +376,9 @@ func (q *publishQueue) saveLocked() {
 		return
 	}
 
-	tmpFile, err := os.CreateTemp(q.dataDir, ".publish_queue_*.tmp")
-	if err != nil {
-		slog.Warn("nostr: failed to create temp file for publish queue", "error", err)
-
-		return
-	}
-
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		slog.Warn("nostr: failed to write publish queue temp file", "error", err)
-
-		return
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		slog.Warn("nostr: failed to close publish queue temp file", "error", err)
-
-		return
-	}
-
-	finalPath := filepath.Join(q.dataDir, publishQueueFile)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
-		slog.Warn("nostr: failed to rename publish queue into place", "error", err)
+	destPath := filepath.Join(q.dataDir, publishQueueFile)
+	if err := atomicfile.Write(destPath, data); err != nil {
+		slog.Warn("nostr: failed to save publish queue", "error", err)
 	}
 }
 

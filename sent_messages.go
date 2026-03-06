@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/pinpox/opencrow/atomicfile"
 )
 
 const (
@@ -109,12 +111,6 @@ func (s *sentMessageStore) saveLocked() {
 		return
 	}
 
-	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
-		slog.Warn("failed to create dir for sent messages", "error", err)
-
-		return
-	}
-
 	data, err := json.Marshal(s.store)
 	if err != nil {
 		slog.Warn("failed to marshal sent messages", "error", err)
@@ -122,35 +118,8 @@ func (s *sentMessageStore) saveLocked() {
 		return
 	}
 
-	dir := s.dataDir
-
-	tmpFile, err := os.CreateTemp(dir, ".sent_messages_*.tmp")
-	if err != nil {
-		slog.Warn("failed to create temp file for sent messages", "error", err)
-
-		return
-	}
-
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		slog.Warn("failed to write sent messages temp file", "error", err)
-
-		return
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		slog.Warn("failed to close sent messages temp file", "error", err)
-
-		return
-	}
-
-	finalPath := filepath.Join(dir, sentMessagesFile)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
-		slog.Warn("failed to rename sent messages into place", "error", err)
+	destPath := filepath.Join(s.dataDir, sentMessagesFile)
+	if err := atomicfile.Write(destPath, data); err != nil {
+		slog.Warn("failed to save sent messages", "error", err)
 	}
 }
