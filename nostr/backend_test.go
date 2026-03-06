@@ -1,9 +1,15 @@
 package nostr
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -686,6 +692,66 @@ func TestRun_ReceivesFileMessage(t *testing.T) {
 	}
 }
 
+func TestRun_ReceivesEncryptedFileMessage(t *testing.T) {
+	t.Parallel()
+
+	plaintext := []byte("\xff\xd8\xff\xe0fake jpeg content for encryption test")
+	ciphertext, keyHex, nonceHex, oxHex := aesGCMEncrypt(t, plaintext)
+
+	// Serve the encrypted blob.
+	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(ciphertext)
+	}))
+	defer imgServer.Close()
+
+	wsURL, cleanup := testutil.StartTestRelay(t)
+	defer cleanup()
+
+	botSK := gonostr.Generate()
+	senderSK := gonostr.Generate()
+
+	c := &messageCollector{}
+	b := newTestBackendWithHandler(t, botSK, []string{wsURL}, nil, c.handler)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	runErr := runBackendAsync(ctx, b)
+
+	time.Sleep(300 * time.Millisecond)
+
+	fileURL := imgServer.URL + "/encrypted-blob"
+	sendTestEncryptedFileMessage(ctx, t, wsURL, senderSK, b.keys.PK, fileURL, "image/jpeg",
+		keyHex, nonceHex, oxHex)
+	waitForMessages(t, c, 1)
+
+	cancel()
+	<-runErr
+
+	msgs := c.get()
+	if len(msgs) != 1 {
+		t.Fatalf("received %d messages, want 1", len(msgs))
+	}
+
+	if !strings.Contains(msgs[0].Text, "attachments/") {
+		t.Fatalf("message should contain local attachment path, got: %q", msgs[0].Text)
+	}
+
+	// Extract the file path and verify contents are decrypted.
+	parts := strings.SplitN(msgs[0].Text, ": ", 2)
+	filePath := strings.TrimSuffix(strings.SplitN(parts[1], "]", 2)[0], "]")
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("reading decrypted file: %v", err)
+	}
+
+	if !bytes.Equal(data, plaintext) {
+		t.Errorf("decrypted content mismatch: got %d bytes, want %d bytes", len(data), len(plaintext))
+	}
+}
+
 // --- test helpers ---
 
 // messageCollector collects backend messages in a thread-safe way.
@@ -876,8 +942,63 @@ func sendTestDM(ctx context.Context, t *testing.T, wsURL string, senderSK gonost
 	}
 }
 
+// aesGCMEncrypt encrypts plaintext with a deterministic test key and returns
+// the ciphertext plus hex-encoded key, nonce, and pre-encryption hash.
+func aesGCMEncrypt(t *testing.T, plaintext []byte) ([]byte, string, string, string) {
+	t.Helper()
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	for i := range nonce {
+		nonce[i] = byte(i + 100)
+	}
+
+	oxHash := sha256.Sum256(plaintext)
+
+	return gcm.Seal(nil, nonce, plaintext, nil),
+		hex.EncodeToString(key),
+		hex.EncodeToString(nonce),
+		hex.EncodeToString(oxHash[:])
+}
+
 // sendTestFileMessage sends a NIP-17 kind 15 file message gift-wrapped to the recipient.
 func sendTestFileMessage(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, fileURL, mimeType string) {
+	t.Helper()
+
+	sendTestFileMessageWithTags(ctx, t, wsURL, senderSK, recipientPK, fileURL, gonostr.Tags{
+		{"file-type", mimeType},
+	})
+}
+
+// sendTestEncryptedFileMessage sends a NIP-17 kind 15 file message with AES-GCM encryption tags.
+func sendTestEncryptedFileMessage(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, fileURL, mimeType, keyHex, nonceHex, oxHex string) {
+	t.Helper()
+
+	sendTestFileMessageWithTags(ctx, t, wsURL, senderSK, recipientPK, fileURL, gonostr.Tags{
+		{"file-type", mimeType},
+		{"encryption-algorithm", "aes-gcm"},
+		{"decryption-key", keyHex},
+		{"decryption-nonce", nonceHex},
+		{"ox", oxHex},
+	})
+}
+
+// sendTestFileMessageWithTags sends a NIP-17 kind 15 file message with arbitrary tags.
+func sendTestFileMessageWithTags(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, fileURL string, extraTags gonostr.Tags) {
 	t.Helper()
 
 	pool := gonostr.NewPool(gonostr.PoolOptions{})
@@ -890,16 +1011,15 @@ func sendTestFileMessage(ctx context.Context, t *testing.T, wsURL string, sender
 		t.Fatalf("getting public key: %v", err)
 	}
 
-	// Build a kind 15 rumor per NIP-17 spec.
+	tags := gonostr.Tags{{"p", recipientPK.Hex()}}
+	tags = append(tags, extraTags...)
+
 	rumor := gonostr.Event{
 		Kind:      15, // KindFileMessage — not in go-nostr yet
 		Content:   fileURL,
 		CreatedAt: gonostr.Now(),
 		PubKey:    ourPubkey,
-		Tags: gonostr.Tags{
-			{"p", recipientPK.Hex()},
-			{"file-type", mimeType},
-		},
+		Tags:      tags,
 	}
 	rumor.ID = rumor.GetID()
 
