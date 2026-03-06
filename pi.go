@@ -163,8 +163,8 @@ type rpcEvent struct {
 	// extension_ui_request fields
 	Method string `json:"method,omitempty"`
 
-	// tool_execution_start fields
-	ToolName string         `json:"toolName,omitempty"`
+	// tool_execution_start fields — camelCase is dictated by the pi protocol.
+	ToolName string         `json:"toolName,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
 	Args     map[string]any `json:"args,omitempty"`
 }
 

@@ -187,7 +187,7 @@ func TestDiscoverSkills_Symlinks(t *testing.T) {
 
 	// Create a target directory with SKILL.md
 	target := t.TempDir()
-	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("test"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("test"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
