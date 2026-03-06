@@ -157,145 +157,6 @@ func (b *Backend) Run(ctx context.Context) error {
 	return nil
 }
 
-// discoverSubscriptionRelays returns the full set of relays to subscribe on:
-// the bot's configured relays, its DM relays, plus the DM relay lists of all
-// allowed users.
-func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
-	seen := make(map[string]struct{}, len(b.cfg.Relays)+len(b.cfg.DMRelays))
-	relays := make([]string, 0, len(b.cfg.Relays)+len(b.cfg.DMRelays))
-
-	addRelay := func(r string) {
-		normalized := strings.TrimRight(r, "/")
-		if _, ok := seen[normalized]; !ok {
-			seen[normalized] = struct{}{}
-
-			relays = append(relays, r)
-		}
-	}
-
-	for _, r := range b.cfg.Relays {
-		addRelay(r)
-	}
-
-	for _, r := range b.cfg.DMRelays {
-		addRelay(r)
-	}
-
-	if len(b.cfg.AllowedUsers) == 0 {
-		return relays
-	}
-
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	for userHex := range b.cfg.AllowedUsers {
-		pk, err := gonostr.PubKeyFromHex(userHex)
-		if err != nil {
-			slog.Warn("nostr: invalid allowed user pubkey", "pubkey", userHex, "error", err)
-
-			continue
-		}
-
-		ie := b.pool.QuerySingle(queryCtx, b.cfg.Relays, gonostr.Filter{
-			Authors: []gonostr.PubKey{pk},
-			Kinds:   []gonostr.Kind{gonostr.KindDMRelayList},
-		}, gonostr.SubscriptionOptions{})
-		if ie == nil {
-			slog.Debug("nostr: no DM relay list found for user", "pubkey", userHex)
-
-			continue
-		}
-
-		for _, tag := range ie.Tags {
-			if len(tag) >= 2 && tag[0] == "relay" {
-				r := tag[1]
-
-				normalized := strings.TrimRight(r, "/")
-				if _, ok := seen[normalized]; !ok {
-					seen[normalized] = struct{}{}
-
-					relays = append(relays, r)
-					slog.Info("nostr: discovered user DM relay", "pubkey", userHex, "relay", r)
-				}
-			}
-		}
-	}
-
-	return relays
-}
-
-// publishProfile publishes a NIP-01 kind 0 metadata event so the bot
-// has a visible name, about, and picture on Nostr clients.
-func (b *Backend) publishProfile(_ context.Context) {
-	p := b.cfg.Profile
-	if p.Name == "" && p.DisplayName == "" && p.About == "" && p.Picture == "" {
-		return
-	}
-
-	meta := make(map[string]string)
-	if p.Name != "" {
-		meta["name"] = p.Name
-	}
-
-	if p.DisplayName != "" {
-		meta["display_name"] = p.DisplayName
-	}
-
-	if p.About != "" {
-		meta["about"] = p.About
-	}
-
-	if p.Picture != "" {
-		meta["picture"] = p.Picture
-	}
-
-	content, err := json.Marshal(meta)
-	if err != nil {
-		slog.Error("nostr: failed to marshal profile metadata", "error", err)
-
-		return
-	}
-
-	evt := gonostr.Event{
-		Kind:      0,
-		CreatedAt: gonostr.Now(),
-		Content:   string(content),
-		PubKey:    b.keys.PK,
-	}
-	if err := evt.Sign(b.keys.SK); err != nil {
-		slog.Error("nostr: failed to sign profile event", "error", err)
-
-		return
-	}
-
-	b.publishToRelays(evt, b.cfg.Relays, "profile")
-}
-
-// publishDMRelayList publishes a NIP-17 DM relay list (kind 10050) so
-// clients can discover where to send gift-wrapped DMs to this bot.
-// Uses DMRelays (not Relays) because some general-purpose relays silently
-// drop kind 1059 gift wraps.
-func (b *Backend) publishDMRelayList(_ context.Context) {
-	tags := make(gonostr.Tags, 0, len(b.cfg.DMRelays))
-	for _, relay := range b.cfg.DMRelays {
-		tags = append(tags, gonostr.Tag{"relay", relay})
-	}
-
-	evt := gonostr.Event{
-		Kind:      gonostr.KindDMRelayList,
-		CreatedAt: gonostr.Now(),
-		Tags:      tags,
-		PubKey:    b.keys.PK,
-	}
-	if err := evt.Sign(b.keys.SK); err != nil {
-		slog.Error("nostr: failed to sign DM relay list", "error", err)
-
-		return
-	}
-
-	b.publishToRelays(evt, b.cfg.Relays, "DM relay list")
-}
-
 // Stop signals the backend to shut down.
 func (b *Backend) Stop() {
 	b.cancelMu.Lock()
@@ -389,6 +250,158 @@ You can include multiple <sendfile> tags in a single response.`
 }
 
 // --- unexported methods ---
+
+// discoverSubscriptionRelays returns the full set of relays to subscribe on:
+// the bot's configured relays, its DM relays, plus the DM relay lists of all
+// allowed users.
+func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
+	seen := make(map[string]struct{}, len(b.cfg.Relays)+len(b.cfg.DMRelays))
+	relays := make([]string, 0, len(b.cfg.Relays)+len(b.cfg.DMRelays))
+
+	addRelay := func(r string) {
+		normalized := strings.TrimRight(r, "/")
+		if _, ok := seen[normalized]; !ok {
+			seen[normalized] = struct{}{}
+
+			relays = append(relays, r)
+		}
+	}
+
+	for _, r := range b.cfg.Relays {
+		addRelay(r)
+	}
+
+	for _, r := range b.cfg.DMRelays {
+		addRelay(r)
+	}
+
+	b.discoverUserDMRelays(ctx, seen, &relays)
+
+	return relays
+}
+
+// discoverUserDMRelays queries each allowed user's DM relay list and adds
+// any new relays to the set.
+func (b *Backend) discoverUserDMRelays(ctx context.Context, seen map[string]struct{}, relays *[]string) {
+	if len(b.cfg.AllowedUsers) == 0 {
+		return
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	for userHex := range b.cfg.AllowedUsers {
+		pk, err := gonostr.PubKeyFromHex(userHex)
+		if err != nil {
+			slog.Warn("nostr: invalid allowed user pubkey", "pubkey", userHex, "error", err)
+
+			continue
+		}
+
+		ie := b.pool.QuerySingle(queryCtx, b.cfg.Relays, gonostr.Filter{
+			Authors: []gonostr.PubKey{pk},
+			Kinds:   []gonostr.Kind{gonostr.KindDMRelayList},
+		}, gonostr.SubscriptionOptions{})
+		if ie == nil {
+			slog.Debug("nostr: no DM relay list found for user", "pubkey", userHex)
+
+			continue
+		}
+
+		for _, tag := range ie.Tags {
+			if len(tag) >= 2 && tag[0] == "relay" {
+				r := tag[1]
+
+				normalized := strings.TrimRight(r, "/")
+				if _, ok := seen[normalized]; !ok {
+					seen[normalized] = struct{}{}
+
+					*relays = append(*relays, r)
+					slog.Info("nostr: discovered user DM relay", "pubkey", userHex, "relay", r)
+				}
+			}
+		}
+	}
+}
+
+// publishProfile publishes a NIP-01 kind 0 metadata event so the bot
+// has a visible name, about, and picture on Nostr clients.
+func (b *Backend) publishProfile(_ context.Context) {
+	p := b.cfg.Profile
+	if p.Name == "" && p.DisplayName == "" && p.About == "" && p.Picture == "" {
+		return
+	}
+
+	meta := buildProfileMeta(p)
+
+	content, err := json.Marshal(meta)
+	if err != nil {
+		slog.Error("nostr: failed to marshal profile metadata", "error", err)
+
+		return
+	}
+
+	evt := gonostr.Event{
+		Kind:      0,
+		CreatedAt: gonostr.Now(),
+		Content:   string(content),
+		PubKey:    b.keys.PK,
+	}
+	if err := evt.Sign(b.keys.SK); err != nil {
+		slog.Error("nostr: failed to sign profile event", "error", err)
+
+		return
+	}
+
+	b.publishToRelays(evt, b.cfg.Relays, "profile")
+}
+
+// buildProfileMeta constructs the metadata map from non-empty profile fields.
+func buildProfileMeta(p ProfileConfig) map[string]string {
+	meta := make(map[string]string)
+	if p.Name != "" {
+		meta["name"] = p.Name
+	}
+
+	if p.DisplayName != "" {
+		meta["display_name"] = p.DisplayName
+	}
+
+	if p.About != "" {
+		meta["about"] = p.About
+	}
+
+	if p.Picture != "" {
+		meta["picture"] = p.Picture
+	}
+
+	return meta
+}
+
+// publishDMRelayList publishes a NIP-17 DM relay list (kind 10050) so
+// clients can discover where to send gift-wrapped DMs to this bot.
+// Uses DMRelays (not Relays) because some general-purpose relays silently
+// drop kind 1059 gift wraps.
+func (b *Backend) publishDMRelayList(_ context.Context) {
+	tags := make(gonostr.Tags, 0, len(b.cfg.DMRelays))
+	for _, relay := range b.cfg.DMRelays {
+		tags = append(tags, gonostr.Tag{"relay", relay})
+	}
+
+	evt := gonostr.Event{
+		Kind:      gonostr.KindDMRelayList,
+		CreatedAt: gonostr.Now(),
+		Tags:      tags,
+		PubKey:    b.keys.PK,
+	}
+	if err := evt.Sign(b.keys.SK); err != nil {
+		slog.Error("nostr: failed to sign DM relay list", "error", err)
+
+		return
+	}
+
+	b.publishToRelays(evt, b.cfg.Relays, "DM relay list")
+}
 
 // pruneSeenLoop prunes stale entries from both dedup sets.
 func (b *Backend) pruneSeenLoop(ctx context.Context) {
