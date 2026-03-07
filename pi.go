@@ -254,6 +254,7 @@ func (p *PiProcess) Kill() {
 		return
 	case <-time.After(5 * time.Second):
 		slog.Warn("pi process did not exit after SIGINT, sending SIGKILL")
+
 		_ = p.cmd.Process.Kill()
 		<-p.done
 	}
