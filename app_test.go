@@ -179,7 +179,7 @@ func TestApp_Restart(t *testing.T) {
 	defer mb.mu.Unlock()
 
 	if len(mb.resetCalls) != 1 || mb.resetCalls[0] != testRoom {
-		t.Errorf("ResetConversation calls = %v, want [!room1]", mb.resetCalls)
+		t.Errorf("ResetConversation calls = %v, want [%s]", mb.resetCalls, testRoom)
 	}
 
 	if len(mb.sentMessages) != 1 {
