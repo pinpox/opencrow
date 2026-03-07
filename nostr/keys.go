@@ -55,3 +55,38 @@ func parseSecretKey(raw string) (gonostr.SecretKey, error) {
 
 	return sk, nil
 }
+
+// DecodeNsecToHex decodes an nsec-encoded private key to its hex
+// representation. If the input is already hex, it is returned as-is.
+func DecodeNsecToHex(raw string) (string, error) {
+	sk, err := parseSecretKey(raw)
+	if err != nil {
+		return "", err
+	}
+
+	return sk.Hex(), nil
+}
+
+// DecodeNpubToHex decodes an npub-encoded public key to its hex
+// representation. If the input is already hex, it is returned as-is.
+func DecodeNpubToHex(raw string) (string, error) {
+	if !strings.HasPrefix(raw, "npub") {
+		return raw, nil
+	}
+
+	prefix, val, err := nip19.Decode(raw)
+	if err != nil {
+		return "", fmt.Errorf("decoding npub %q: %w", raw, err)
+	}
+
+	if prefix != "npub" {
+		return "", fmt.Errorf("expected npub prefix, got %s", prefix)
+	}
+
+	pk, ok := val.(gonostr.PubKey)
+	if !ok {
+		return "", fmt.Errorf("npub decoded to unexpected type %T", val)
+	}
+
+	return pk.Hex(), nil
+}
