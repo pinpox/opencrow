@@ -174,15 +174,7 @@ func (h *HeartbeatScheduler) executeHeartbeatPrompt(ctx context.Context, pi *PiP
 		return h.handleHeartbeatError(ctx, roomID, err)
 	}
 
-	if containsHeartbeatOK(reply) {
-		slog.Info("heartbeat: HEARTBEAT_OK, suppressing")
-
-		return false
-	}
-
-	if reply == "" {
-		slog.Info("heartbeat: empty response, suppressing")
-
+	if shouldSuppressReply(reply, "heartbeat") {
 		return false
 	}
 
@@ -261,9 +253,21 @@ func isEmptyListItem(line string) bool {
 	return false
 }
 
-// containsHeartbeatOK checks if the response contains HEARTBEAT_OK.
-// If the LLM included the token anywhere in its reply, it's signaling that
-// nothing actionable needs to reach the user — suppress the entire message.
-func containsHeartbeatOK(response string) bool {
-	return strings.Contains(response, "HEARTBEAT_OK")
+// shouldSuppressReply returns true if the reply should not be forwarded
+// to the user — either because it contains HEARTBEAT_OK or is empty.
+// The label is used for log messages (e.g. "heartbeat", "trigger").
+func shouldSuppressReply(reply, label string) bool {
+	if strings.Contains(reply, "HEARTBEAT_OK") {
+		slog.Info(label + ": HEARTBEAT_OK, suppressing")
+
+		return true
+	}
+
+	if reply == "" {
+		slog.Info(label + ": empty response, suppressing")
+
+		return true
+	}
+
+	return false
 }
