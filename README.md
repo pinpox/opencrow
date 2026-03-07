@@ -60,6 +60,7 @@ Send these as plain text messages in any conversation with the bot:
 
 | Command | Description |
 |---|---|
+| `!help` | Show available commands |
 | `!restart` | Kill the current pi process and start fresh on the next message |
 | `!stop` | Abort the currently running agent turn |
 | `!skills` | List the skills loaded for this bot instance |

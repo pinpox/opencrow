@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/pinpox/opencrow/backend"
 )
+
+const testRoom = "!room1"
 
 // mockBackend records calls for testing.
 type mockBackend struct {
@@ -73,6 +76,39 @@ func (m *mockBackend) SystemPromptExtra() string {
 	return m.systemPromptExtraText
 }
 
+func TestApp_Help(t *testing.T) {
+	t.Parallel()
+
+	mb := &mockBackend{}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil, t.TempDir())
+
+	ctx := context.Background()
+	app.HandleMessage(ctx, backend.Message{
+		ConversationID: testRoom,
+		SenderID:       "@user:example.com",
+		Text:           "!help",
+	})
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if len(mb.sentMessages) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+	}
+
+	msg := mb.sentMessages[0]
+	if msg.conversationID != testRoom {
+		t.Errorf("sent to %q, want %q", msg.conversationID, testRoom)
+	}
+
+	for _, cmd := range []string{"!help", "!restart", "!stop", "!skills"} {
+		if !strings.Contains(msg.text, cmd) {
+			t.Errorf("help text missing %q", cmd)
+		}
+	}
+}
+
 func TestApp_Restart(t *testing.T) {
 	t.Parallel()
 
@@ -82,7 +118,7 @@ func TestApp_Restart(t *testing.T) {
 
 	ctx := context.Background()
 	app.HandleMessage(ctx, backend.Message{
-		ConversationID: "!room1",
+		ConversationID: testRoom,
 		SenderID:       "@user:example.com",
 		Text:           "!restart",
 	})
@@ -90,7 +126,7 @@ func TestApp_Restart(t *testing.T) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
-	if len(mb.resetCalls) != 1 || mb.resetCalls[0] != "!room1" {
+	if len(mb.resetCalls) != 1 || mb.resetCalls[0] != testRoom {
 		t.Errorf("ResetConversation calls = %v, want [!room1]", mb.resetCalls)
 	}
 
@@ -98,8 +134,8 @@ func TestApp_Restart(t *testing.T) {
 		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
 	}
 
-	if mb.sentMessages[0].conversationID != "!room1" {
-		t.Errorf("sent to %q, want %q", mb.sentMessages[0].conversationID, "!room1")
+	if mb.sentMessages[0].conversationID != testRoom {
+		t.Errorf("sent to %q, want %q", mb.sentMessages[0].conversationID, testRoom)
 	}
 }
 
@@ -112,7 +148,7 @@ func TestApp_Skills(t *testing.T) {
 
 	ctx := context.Background()
 	app.HandleMessage(ctx, backend.Message{
-		ConversationID: "!room1",
+		ConversationID: testRoom,
 		SenderID:       "@user:example.com",
 		Text:           "!skills",
 	})

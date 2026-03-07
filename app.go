@@ -64,6 +64,8 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	a.sent.Put(msg.ConversationID, msg.MessageID, msg.Text)
 
 	switch msg.Text {
+	case "!help":
+		a.handleHelp(ctx, msg)
 	case "!restart":
 		a.handleRestart(ctx, msg)
 	case "!stop":
@@ -73,6 +75,15 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	default:
 		a.handlePrompt(ctx, msg)
 	}
+}
+
+func (a *App) handleHelp(ctx context.Context, msg backend.Message) {
+	help := "Available commands:\n" +
+		"  !help    — Show this help message\n" +
+		"  !restart — Kill the current session and start fresh\n" +
+		"  !stop    — Abort the currently running agent turn\n" +
+		"  !skills  — List loaded skills"
+	a.backend.SendMessage(ctx, msg.ConversationID, help, "")
 }
 
 func (a *App) handleRestart(ctx context.Context, msg backend.Message) {
