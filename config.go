@@ -8,8 +8,7 @@ import (
 	"strings"
 	"time"
 
-	gonostr "fiatjaf.com/nostr"
-	"fiatjaf.com/nostr/nip19"
+	nostrkeys "github.com/pinpox/opencrow/nostr"
 )
 
 const (
@@ -352,51 +351,24 @@ func loadNostrPrivateKey(getenv func(string) string) (string, error) {
 		return "", errors.New("OPENCROW_NOSTR_PRIVATE_KEY or OPENCROW_NOSTR_PRIVATE_KEY_FILE is required")
 	}
 
-	// Decode nsec if needed
-	if strings.HasPrefix(raw, "nsec") {
-		prefix, val, err := nip19.Decode(raw)
-		if err != nil {
-			return "", fmt.Errorf("decoding nsec: %w", err)
-		}
-
-		if prefix != "nsec" {
-			return "", fmt.Errorf("expected nsec prefix, got %s", prefix)
-		}
-
-		sk, ok := val.(gonostr.SecretKey)
-		if !ok {
-			return "", fmt.Errorf("decoded value is not gonostr.SecretKey: %T", val)
-		}
-
-		raw = sk.Hex()
+	hex, err := nostrkeys.DecodeNsecToHex(raw)
+	if err != nil {
+		return "", fmt.Errorf("decoding nostr private key: %w", err)
 	}
 
-	return raw, nil
+	return hex, nil
 }
 
 func parseNostrAllowedUsers(s string) (map[string]struct{}, error) {
 	users := make(map[string]struct{})
 
 	for _, u := range parseCommaSeparated(s) {
-		if strings.HasPrefix(u, "npub") {
-			prefix, val, err := nip19.Decode(u)
-			if err != nil {
-				return nil, fmt.Errorf("decoding npub %q: %w", u, err)
-			}
-
-			if prefix != "npub" {
-				return nil, fmt.Errorf("expected npub prefix, got %s", prefix)
-			}
-
-			pk, ok := val.(gonostr.PubKey)
-			if !ok {
-				return nil, fmt.Errorf("decoded value is not gonostr.PubKey: %T", val)
-			}
-
-			u = pk.Hex()
+		hex, err := nostrkeys.DecodeNpubToHex(u)
+		if err != nil {
+			return nil, fmt.Errorf("decoding nostr allowed user: %w", err)
 		}
 
-		users[u] = struct{}{}
+		users[hex] = struct{}{}
 	}
 
 	return users, nil
