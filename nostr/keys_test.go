@@ -27,6 +27,15 @@ func TestLoadKeys_Hex(t *testing.T) {
 	}
 }
 
+func TestDecodeNpubToHex_InvalidHex(t *testing.T) {
+	t.Parallel()
+
+	_, err := DecodeNpubToHex("not-valid-hex")
+	if err == nil {
+		t.Fatal("expected error for invalid hex input, got nil")
+	}
+}
+
 func TestLoadKeys_Nsec(t *testing.T) {
 	t.Parallel()
 

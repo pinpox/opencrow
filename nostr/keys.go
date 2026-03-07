@@ -68,9 +68,14 @@ func DecodeNsecToHex(raw string) (string, error) {
 }
 
 // DecodeNpubToHex decodes an npub-encoded public key to its hex
-// representation. If the input is already hex, it is returned as-is.
+// representation. If the input is already hex, it is validated and
+// returned. Returns an error for invalid input.
 func DecodeNpubToHex(raw string) (string, error) {
 	if !strings.HasPrefix(raw, "npub") {
+		if _, err := gonostr.PubKeyFromHex(raw); err != nil {
+			return "", fmt.Errorf("parsing hex public key: %w", err)
+		}
+
 		return raw, nil
 	}
 
