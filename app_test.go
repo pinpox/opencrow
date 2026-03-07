@@ -76,6 +76,32 @@ func (m *mockBackend) SystemPromptExtra() string {
 	return m.systemPromptExtraText
 }
 
+func TestApp_Stop_NoSession(t *testing.T) {
+	t.Parallel()
+
+	mb := &mockBackend{}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil, t.TempDir())
+
+	ctx := context.Background()
+	app.HandleMessage(ctx, backend.Message{
+		ConversationID: testRoom,
+		SenderID:       "@user:example.com",
+		Text:           "!stop",
+	})
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if len(mb.sentMessages) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+	}
+
+	if !strings.Contains(mb.sentMessages[0].text, "No active session") {
+		t.Errorf("expected 'No active session' message, got %q", mb.sentMessages[0].text)
+	}
+}
+
 func TestApp_Compact_NoSession(t *testing.T) {
 	t.Parallel()
 
