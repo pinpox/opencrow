@@ -35,7 +35,6 @@ type PiProcess struct {
 	done       chan struct{}
 	mu         sync.Mutex
 	lastUse    time.Time
-	roomID     string
 	onToolCall func(ToolCallEvent) // optional callback for tool_execution_start events
 
 	// cancelMu protects cancelFunc for concurrent access from Abort().
@@ -66,10 +65,10 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, erro
 	cmd.Dir = cfg.WorkingDir
 	cmd.Env = os.Environ()
 
-	return startPiProcess(cmd, roomID, cfg.SessionDir)
+	return startPiProcess(cmd, cfg.SessionDir)
 }
 
-func startPiProcess(cmd *exec.Cmd, roomID, sessionDir string) (*PiProcess, error) {
+func startPiProcess(cmd *exec.Cmd, sessionDir string) (*PiProcess, error) {
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("creating stdin pipe: %w", err)
@@ -94,13 +93,13 @@ func startPiProcess(cmd *exec.Cmd, roomID, sessionDir string) (*PiProcess, error
 		return nil, fmt.Errorf("starting pi: %w", err)
 	}
 
-	slog.Info("pi process started", "room", roomID, "pid", cmd.Process.Pid, "session_dir", sessionDir)
+	slog.Info("pi process started", "pid", cmd.Process.Pid, "session_dir", sessionDir)
 
 	// Log stderr in background
 	go func() {
 		scanner := bufio.NewScanner(stderrPipe)
 		for scanner.Scan() {
-			slog.Debug("pi stderr", "room", roomID, "line", scanner.Text())
+			slog.Debug("pi stderr", "line", scanner.Text())
 		}
 	}()
 
@@ -114,7 +113,7 @@ func startPiProcess(cmd *exec.Cmd, roomID, sessionDir string) (*PiProcess, error
 
 		close(done)
 
-		slog.Info("pi process exited", "room", roomID)
+		slog.Info("pi process exited")
 	}()
 
 	return &PiProcess{
@@ -123,7 +122,6 @@ func startPiProcess(cmd *exec.Cmd, roomID, sessionDir string) (*PiProcess, error
 		stdout:  scanner,
 		done:    done,
 		lastUse: time.Now(),
-		roomID:  roomID,
 	}, nil
 }
 
@@ -186,7 +184,7 @@ func (p *PiProcess) Prompt(ctx context.Context, message string, onToolCall ...fu
 	// If lock is held (likely by a heartbeat), abort it so user messages
 	// always take priority. The heartbeat will retry on the next tick.
 	if !p.mu.TryLock() {
-		slog.Info("prompt: lock contended, aborting running operation", "room", p.roomID)
+		slog.Info("prompt: lock contended, aborting running operation")
 		p.Abort()
 		p.mu.Lock()
 	}
@@ -255,7 +253,7 @@ func (p *PiProcess) Kill() {
 	case <-p.done:
 		return
 	case <-time.After(5 * time.Second):
-		slog.Warn("pi process did not exit after SIGINT, sending SIGKILL", "room", p.roomID)
+		slog.Warn("pi process did not exit after SIGINT, sending SIGKILL")
 		_ = p.cmd.Process.Kill()
 		<-p.done
 	}
@@ -355,7 +353,7 @@ func (p *PiProcess) sendAbort() {
 
 	abortData, err := json.Marshal(abort)
 	if err != nil {
-		slog.Warn("failed to marshal abort command", "room", p.roomID, "error", err)
+		slog.Warn("failed to marshal abort command", "error", err)
 
 		return
 	}
@@ -396,18 +394,18 @@ func (p *PiProcess) readUntilAgentEnd() (string, error) {
 func (p *PiProcess) handleRPCLine(line string) (string, bool, error) {
 	var evt rpcEvent
 	if err := json.Unmarshal([]byte(line), &evt); err != nil {
-		slog.Warn("malformed JSON from pi", "room", p.roomID, "error", err, "line", line)
+		slog.Warn("malformed JSON from pi", "error", err, "line", line)
 
 		return "", false, nil
 	}
 
-	slog.Debug("pi rpc event", "room", p.roomID, "type", evt.Type)
+	slog.Debug("pi rpc event", "type", evt.Type)
 
 	switch evt.Type {
 	case "agent_end":
 		text := extractLastAssistantText(evt.Messages)
 		if text == "" {
-			slog.Warn("agent_end contained no assistant text", "room", p.roomID, "messages_len", len(evt.Messages))
+			slog.Warn("agent_end contained no assistant text", "messages_len", len(evt.Messages))
 		}
 
 		return text, true, nil
@@ -444,7 +442,7 @@ func (p *PiProcess) autoRespondExtensionUI(evt rpcEvent) {
 
 		data, err := json.Marshal(resp)
 		if err != nil {
-			slog.Warn("failed to marshal extension_ui_response", "room", p.roomID, "error", err)
+			slog.Warn("failed to marshal extension_ui_response", "error", err)
 
 			return
 		}
@@ -452,7 +450,7 @@ func (p *PiProcess) autoRespondExtensionUI(evt rpcEvent) {
 		data = append(data, '\n')
 
 		if _, err := p.stdin.Write(data); err != nil {
-			slog.Warn("failed to send extension_ui_response", "room", p.roomID, "error", err)
+			slog.Warn("failed to send extension_ui_response", "error", err)
 		}
 	}
 	// Fire-and-forget methods (notify, setStatus, setWidget, setTitle, set_editor_text) are ignored.

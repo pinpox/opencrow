@@ -80,7 +80,7 @@ func (t *TriggerPipeManager) StartRoom(ctx context.Context, roomID string) {
 	pipePath := TriggerPipePath(t.piCfg.SessionDir)
 
 	if err := ensureFIFO(pipePath); err != nil {
-		slog.Warn("trigger: failed to ensure FIFO", "room", roomID, "path", pipePath, "error", err)
+		slog.Warn("trigger: failed to ensure FIFO", "path", pipePath, "error", err)
 
 		return
 	}
@@ -132,7 +132,7 @@ func (t *TriggerPipeManager) readLoop(ctx context.Context, roomID, pipePath stri
 	// Open with O_RDWR so the fd stays open even when writers close their end.
 	f, err := os.OpenFile(pipePath, os.O_RDWR, 0)
 	if err != nil {
-		slog.Error("trigger: failed to open FIFO", "room", roomID, "path", pipePath, "error", err)
+		slog.Error("trigger: failed to open FIFO", "path", pipePath, "error", err)
 
 		return
 	}
@@ -156,12 +156,12 @@ func (t *TriggerPipeManager) readLoop(ctx context.Context, roomID, pipePath stri
 			return
 		}
 
-		slog.Info("trigger: received", "room", roomID, "content", line)
+		slog.Info("trigger: received", "content", line)
 		t.processTrigger(ctx, roomID, line)
 	}
 
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		slog.Warn("trigger: scanner error", "room", roomID, "error", err)
+		slog.Warn("trigger: scanner error", "error", err)
 	}
 }
 
@@ -172,7 +172,7 @@ func (t *TriggerPipeManager) processTrigger(ctx context.Context, roomID, content
 
 	pi, err := t.pool.Get(ctx, roomID)
 	if err != nil {
-		slog.Error("trigger: failed to get pi process", "room", roomID, "error", err)
+		slog.Error("trigger: failed to get pi process", "error", err)
 
 		return
 	}
@@ -181,20 +181,20 @@ func (t *TriggerPipeManager) processTrigger(ctx context.Context, roomID, content
 
 	reply, err := pi.PromptNoTouch(ctx, prompt)
 	if err != nil {
-		slog.Error("trigger: pi prompt failed", "room", roomID, "error", err)
+		slog.Error("trigger: pi prompt failed", "error", err)
 		t.pool.Remove(roomID)
 
 		return
 	}
 
 	if containsHeartbeatOK(reply) {
-		slog.Info("trigger: HEARTBEAT_OK, suppressing", "room", roomID)
+		slog.Info("trigger: HEARTBEAT_OK, suppressing")
 
 		return
 	}
 
 	if reply == "" {
-		slog.Info("trigger: empty response, suppressing", "room", roomID)
+		slog.Info("trigger: empty response, suppressing")
 
 		return
 	}

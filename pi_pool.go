@@ -62,7 +62,7 @@ func (pool *PiPool) Remove(roomID string) {
 	pool.mu.Unlock()
 
 	if ok {
-		slog.Info("removing pi process", "room", roomID)
+		slog.Info("removing pi process")
 		p.Kill()
 	}
 }
@@ -93,8 +93,8 @@ func (pool *PiPool) StopAll() {
 	pool.processes = make(map[string]*PiProcess)
 	pool.mu.Unlock()
 
-	for roomID, p := range procs {
-		slog.Info("stopping pi process", "room", roomID)
+	for _, p := range procs {
+		slog.Info("stopping pi process")
 		p.Kill()
 	}
 }
@@ -148,7 +148,7 @@ func (pool *PiPool) reapIdle() {
 	pool.mu.Unlock()
 
 	for _, roomID := range toReap {
-		slog.Info("reaping idle pi process", "room", roomID)
+		slog.Info("reaping idle pi process")
 		pool.Remove(roomID)
 	}
 }

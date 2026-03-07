@@ -134,11 +134,11 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
 		return false
 	}
 
-	slog.Info("heartbeat firing", "room", roomID)
+	slog.Info("heartbeat firing")
 
 	pi, err := h.pool.Get(ctx, roomID)
 	if err != nil {
-		slog.Error("heartbeat: failed to get pi process", "room", roomID, "error", err)
+		slog.Error("heartbeat: failed to get pi process", "error", err)
 
 		return false
 	}
@@ -154,7 +154,7 @@ func (h *HeartbeatScheduler) readHeartbeatContent(roomID string) string {
 
 	heartbeatContent, err := os.ReadFile(heartbeatPath)
 	if err != nil && !os.IsNotExist(err) {
-		slog.Warn("failed to read HEARTBEAT.md", "room", roomID, "path", heartbeatPath, "error", err)
+		slog.Warn("failed to read HEARTBEAT.md", "path", heartbeatPath, "error", err)
 	}
 
 	return strings.TrimSpace(string(heartbeatContent))
@@ -165,7 +165,7 @@ func (h *HeartbeatScheduler) readHeartbeatContent(roomID string) string {
 func (h *HeartbeatScheduler) executeHeartbeatPrompt(ctx context.Context, pi *PiProcess, roomID, prompt string) bool {
 	reply, err := pi.PromptNoTouch(ctx, prompt, nil)
 	if errors.Is(err, ErrBusy) {
-		slog.Info("heartbeat: skipped, pi process busy with user prompt", "room", roomID)
+		slog.Info("heartbeat: skipped, pi process busy with user prompt")
 
 		return true
 	}
@@ -175,13 +175,13 @@ func (h *HeartbeatScheduler) executeHeartbeatPrompt(ctx context.Context, pi *PiP
 	}
 
 	if containsHeartbeatOK(reply) {
-		slog.Info("heartbeat: HEARTBEAT_OK, suppressing", "room", roomID)
+		slog.Info("heartbeat: HEARTBEAT_OK, suppressing")
 
 		return false
 	}
 
 	if reply == "" {
-		slog.Info("heartbeat: empty response, suppressing", "room", roomID)
+		slog.Info("heartbeat: empty response, suppressing")
 
 		return false
 	}
@@ -195,12 +195,12 @@ func (h *HeartbeatScheduler) executeHeartbeatPrompt(ctx context.Context, pi *PiP
 // Returns true when the heartbeat should be retried later.
 func (h *HeartbeatScheduler) handleHeartbeatError(ctx context.Context, roomID string, err error) bool {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		slog.Info("heartbeat: aborted by user prompt", "room", roomID)
+		slog.Info("heartbeat: aborted by user prompt")
 
 		return true // skip, don't update lastBeat so we retry
 	}
 
-	slog.Error("heartbeat: pi prompt failed", "room", roomID, "error", err)
+	slog.Error("heartbeat: pi prompt failed", "error", err)
 	h.pool.Remove(roomID)
 
 	return false
