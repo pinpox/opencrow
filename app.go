@@ -96,8 +96,8 @@ func (a *App) handleRestart(ctx context.Context, msg backend.Message) {
 }
 
 func (a *App) handleStop(ctx context.Context, msg backend.Message) {
-	pi, err := a.pool.Get(ctx, msg.ConversationID)
-	if err != nil {
+	pi := a.pool.GetExisting(msg.ConversationID)
+	if pi == nil {
 		a.backend.SendMessage(ctx, msg.ConversationID, "No active session.", "")
 
 		return
