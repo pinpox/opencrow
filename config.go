@@ -192,20 +192,10 @@ func parseDuration(val string, defaultVal time.Duration, name string) (time.Dura
 }
 
 func parseSkills(getenv func(string) string) []string {
-	var skills []string
-
-	if v := getenv("OPENCROW_PI_SKILLS"); v != "" {
-		for s := range strings.SplitSeq(v, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				skills = append(skills, s)
-			}
-		}
-	}
+	skills := parseCommaSeparated(getenv("OPENCROW_PI_SKILLS"))
 
 	if dir := getenv("OPENCROW_PI_SKILLS_DIR"); dir != "" {
-		discovered := discoverSkills(dir)
-		skills = append(skills, discovered...)
+		skills = append(skills, discoverSkills(dir)...)
 	}
 
 	return skills
