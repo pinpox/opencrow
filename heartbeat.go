@@ -129,7 +129,7 @@ func (h *HeartbeatScheduler) scanSessionDir() []string {
 
 // tick performs a single heartbeat for a room. Returns true if skipped (pi busy).
 func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
-	content := h.readHeartbeatContent(roomID)
+	content := h.readHeartbeatContent()
 	if isEffectivelyEmpty(content) {
 		return false
 	}
@@ -148,8 +148,8 @@ func (h *HeartbeatScheduler) tick(ctx context.Context, roomID string) bool {
 	return h.executeHeartbeatPrompt(ctx, pi, roomID, prompt)
 }
 
-// readHeartbeatContent reads and trims HEARTBEAT.md for a room.
-func (h *HeartbeatScheduler) readHeartbeatContent(roomID string) string {
+// readHeartbeatContent reads and trims HEARTBEAT.md from the session directory.
+func (h *HeartbeatScheduler) readHeartbeatContent() string {
 	heartbeatPath := filepath.Join(h.piCfg.SessionDir, "HEARTBEAT.md")
 
 	heartbeatContent, err := os.ReadFile(heartbeatPath)
