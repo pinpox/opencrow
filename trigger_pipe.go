@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -181,6 +182,12 @@ func (t *TriggerPipeManager) processTrigger(ctx context.Context, roomID, content
 
 	reply, err := pi.PromptNoTouch(ctx, prompt)
 	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			slog.Info("trigger: aborted by user prompt")
+
+			return
+		}
+
 		slog.Error("trigger: pi prompt failed", "error", err)
 		t.pool.Remove(roomID)
 
