@@ -16,6 +16,13 @@ let
     lib.mapAttrsToList (name: path: { inherit name path; }) cfg.skills
   );
 
+  # Generate a settings.json for pi that lists declared extensions.
+  # Installed into PI_CODING_AGENT_DIR at service startup so pi
+  # auto-discovers them.
+  piSettingsJson = pkgs.writeText "pi-settings.json" (
+    builtins.toJSON ({ extensions = lib.attrValues cfg.extensions; } // cfg.piSettings)
+  );
+
   # Host-side wrapper to run pi inside the container as the opencrow user,
   # e.g. `opencrow-pi auth login` to complete OAuth.
   opencrowPi = pkgs.writeShellScriptBin "opencrow-pi" ''
@@ -60,6 +67,39 @@ in
           web = "''${opencrowPkg}/share/opencrow/skills/web";
           my-custom-skill = ./my-custom-skill;
           kagi-search = "''${pkgs.fetchFromGitHub { owner = "someone"; repo = "pi-skills"; rev = "main"; hash = "..."; }}/kagi-search";
+        }
+      '';
+    };
+
+    extensions = lib.mkOption {
+      type = lib.types.attrsOf lib.types.path;
+      default = { };
+      description = ''
+        Pi extension files or directories to make available, keyed by
+        name. Each value must be a path to a .ts file or a directory
+        containing an index.ts. All paths are written into a generated
+        settings.json that pi reads from PI_CODING_AGENT_DIR.
+      '';
+      example = lib.literalExpression ''
+        {
+          my-ext = ./extensions/my-ext.ts;
+          permission-gate = "''${pkgs.fetchFromGitHub { owner = "someone"; repo = "pi-extensions"; rev = "main"; hash = "..."; }}/permission-gate";
+        }
+      '';
+    };
+
+    piSettings = lib.mkOption {
+      type = lib.types.attrsOf lib.types.anything;
+      default = { };
+      description = ''
+        Extra keys to include in the generated pi settings.json.
+        The `extensions` key is automatically populated from the
+        `extensions` option and should not be set here.
+      '';
+      example = lib.literalExpression ''
+        {
+          packages = [ "npm:@foo/bar@1.0.0" ];
+          compaction = { enabled = true; };
         }
       '';
     };
@@ -367,6 +407,13 @@ in
             home = "/var/lib/opencrow";
           };
           users.groups.opencrow = { };
+
+          # Place the generated settings.json into PI_CODING_AGENT_DIR
+          # so pi discovers declared extensions and packages.
+          systemd.tmpfiles.rules = [
+            "d ${cfg.environment.PI_CODING_AGENT_DIR} 0750 opencrow opencrow -"
+            "L+ ${cfg.environment.PI_CODING_AGENT_DIR}/settings.json - - - - ${piSettingsJson}"
+          ];
 
           systemd.services.opencrow = {
             description = "OpenCrow Messaging Bot";
