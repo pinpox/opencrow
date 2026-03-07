@@ -61,8 +61,26 @@ Send these as plain text messages in any conversation with the bot:
 | Command | Description |
 |---|---|
 | `!restart` | Kill the current pi process and start fresh on the next message |
+| `!stop` | Abort the currently running agent turn |
 | `!skills` | List the skills loaded for this bot instance |
 | `!verify` | (Matrix only) Set up cross-signing so the bot's device shows as verified |
+
+## General configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENCROW_BACKEND` | `matrix` | Messaging backend (`matrix` or `nostr`) |
+| `OPENCROW_PI_BINARY` | `pi` | Path to the pi binary |
+| `OPENCROW_PI_SESSION_DIR` | `/var/lib/opencrow/sessions` | Session data directory |
+| `OPENCROW_PI_PROVIDER` | `anthropic` | LLM provider |
+| `OPENCROW_PI_MODEL` | `claude-opus-4-6` | Model name |
+| `OPENCROW_PI_WORKING_DIR` | `/var/lib/opencrow` | Working directory for pi |
+| `OPENCROW_PI_IDLE_TIMEOUT` | `30m` | Kill pi after this duration of inactivity |
+| `OPENCROW_PI_SYSTEM_PROMPT` | built-in | Custom system prompt |
+| `OPENCROW_SOUL_FILE` | _(empty)_ | Path to a file containing the system prompt (overrides `OPENCROW_PI_SYSTEM_PROMPT`) |
+| `OPENCROW_PI_SKILLS` | _(empty)_ | Comma-separated skill directory paths |
+| `OPENCROW_PI_SKILLS_DIR` | _(empty)_ | Directory containing skill subdirectories |
+| `OPENCROW_SHOW_TOOL_CALLS` | `false` | Show tool invocations (bash, read, edit, …) as messages in the chat |
 
 ## File handling
 
