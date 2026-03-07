@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sync"
 	"testing"
 	"time"
 )
@@ -98,12 +97,7 @@ func setupTriggerTest(t *testing.T) (*PiProcess, *os.File, *PiPool, *TriggerPipe
 	pool.processes[roomID] = pi
 	pool.mu.Unlock()
 
-	var mu sync.Mutex
-
-	sendReply := func(_ context.Context, _ string, text string) {
-		mu.Lock()
-		defer mu.Unlock()
-	}
+	sendReply := func(_ context.Context, _ string, _ string) {}
 	setTyping := func(_ context.Context, _ string, _ bool) {}
 
 	triggerMgr := NewTriggerPipeManager(pool, cfg, "trigger prompt",
