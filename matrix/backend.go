@@ -134,8 +134,12 @@ func (b *Backend) Stop() {
 
 // Close releases crypto resources.
 func (b *Backend) Close() error {
-	if b.cryptoHelper != nil {
-		return fmt.Errorf("closing crypto helper: %w", b.cryptoHelper.Close())
+	if b.cryptoHelper == nil {
+		return nil
+	}
+
+	if err := b.cryptoHelper.Close(); err != nil {
+		return fmt.Errorf("closing crypto helper: %w", err)
 	}
 
 	return nil
