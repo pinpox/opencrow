@@ -63,6 +63,7 @@ Send these as plain text messages in any conversation with the bot:
 | `!help` | Show available commands |
 | `!restart` | Kill the current pi process and start fresh on the next message |
 | `!stop` | Abort the currently running agent turn |
+| `!compact` | Compact conversation context to reduce token usage |
 | `!skills` | List the skills loaded for this bot instance |
 | `!verify` | (Matrix only) Set up cross-signing so the bot's device shows as verified |
 

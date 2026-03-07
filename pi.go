@@ -155,6 +155,9 @@ type rpcEvent struct {
 	Success *bool  `json:"success,omitempty"`
 	Error   string `json:"error,omitempty"`
 
+	// response data (used by compact, get_session_stats, etc.)
+	Data json.RawMessage `json:"data,omitempty"`
+
 	// agent_end fields
 	Messages json.RawMessage `json:"messages,omitempty"`
 
@@ -164,6 +167,12 @@ type rpcEvent struct {
 	// tool_execution_start fields — camelCase is dictated by the pi protocol.
 	ToolName string         `json:"toolName,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
 	Args     map[string]any `json:"args,omitempty"`
+}
+
+// CompactResult holds the data returned by a successful compact command.
+type CompactResult struct {
+	Summary      string `json:"summary"`
+	TokensBefore int    `json:"tokensBefore,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
 }
 
 // agentMessage represents a message in an agent_end event.
@@ -224,6 +233,38 @@ func (p *PiProcess) PromptNoTouch(ctx context.Context, message string, onToolCal
 	return p.sendAndWait(ctx, message)
 }
 
+// Compact sends a compact command to reduce context token usage.
+// Returns ErrBusy if a prompt is currently running.
+func (p *PiProcess) Compact(ctx context.Context) (*CompactResult, error) {
+	if !p.mu.TryLock() {
+		return nil, ErrBusy
+	}
+	defer p.mu.Unlock()
+
+	if !p.IsAlive() {
+		return nil, errors.New("pi process is not alive")
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	p.cancelMu.Lock()
+	p.cancelFunc = cancel
+	p.cancelMu.Unlock()
+
+	defer func() {
+		p.cancelMu.Lock()
+		p.cancelFunc = nil
+		p.cancelMu.Unlock()
+	}()
+
+	if err := p.sendCommand(map[string]string{"type": "compact"}); err != nil {
+		return nil, err
+	}
+
+	return p.waitForCompactResponse(ctx)
+}
+
 // Abort cancels the currently running prompt, if any.
 // Safe to call concurrently from another goroutine (e.g. !stop handler).
 func (p *PiProcess) Abort() bool {
@@ -275,6 +316,90 @@ func (p *PiProcess) LastUse() time.Time {
 	return p.lastUse
 }
 
+// sendCommand marshals and writes a JSON command to pi's stdin.
+func (p *PiProcess) sendCommand(cmd any) error {
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("marshaling command: %w", err)
+	}
+
+	data = append(data, '\n')
+
+	if _, err := p.stdin.Write(data); err != nil {
+		return fmt.Errorf("writing to pi stdin: %w", err)
+	}
+
+	return nil
+}
+
+// waitForCompactResponse reads events until the compact response arrives.
+func (p *PiProcess) waitForCompactResponse(ctx context.Context) (*CompactResult, error) {
+	type result struct {
+		compact *CompactResult
+		err     error
+	}
+
+	resultCh := make(chan result, 1)
+
+	go func() {
+		cr, err := p.readCompactResponse()
+		resultCh <- result{cr, err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		p.sendAbort()
+
+		// Wait for the reader goroutine to finish so we don't leave it
+		// consuming events meant for subsequent operations.
+		<-resultCh
+
+		return nil, fmt.Errorf("context cancelled: %w", ctx.Err())
+	case r := <-resultCh:
+		return r.compact, r.err
+	}
+}
+
+// readCompactResponse reads from stdout until a compact response event arrives.
+func (p *PiProcess) readCompactResponse() (*CompactResult, error) {
+	for p.stdout.Scan() {
+		line := p.stdout.Text()
+		if line == "" {
+			continue
+		}
+
+		var evt rpcEvent
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			slog.Warn("malformed JSON from pi", "error", err, "line", line)
+
+			continue
+		}
+
+		slog.Debug("pi rpc event", "type", evt.Type)
+
+		if evt.Type != "response" || evt.Command != "compact" {
+			continue
+		}
+
+		if evt.Success != nil && !*evt.Success {
+			return nil, fmt.Errorf("compact failed: %s", evt.Error)
+		}
+
+		var cr CompactResult
+		if err := json.Unmarshal(evt.Data, &cr); err != nil {
+			return nil, fmt.Errorf("parsing compact result: %w", err)
+		}
+
+		return &cr, nil
+	}
+
+	if err := p.stdout.Err(); err != nil {
+		return nil, fmt.Errorf("reading pi stdout: %w", err)
+	}
+
+	return nil, errors.New("pi process closed stdout (EOF)")
+}
+
 // sendAndWait sends a prompt command and waits for the agent to finish.
 // Must be called with p.mu held.
 func (p *PiProcess) sendAndWait(ctx context.Context, message string) (string, error) {
@@ -304,23 +429,10 @@ func (p *PiProcess) sendAndWait(ctx context.Context, message string) (string, er
 }
 
 func (p *PiProcess) sendPromptCommand(message string) error {
-	cmd := map[string]string{
+	return p.sendCommand(map[string]string{
 		"type":    "prompt",
 		"message": message,
-	}
-
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return fmt.Errorf("marshaling prompt: %w", err)
-	}
-
-	data = append(data, '\n')
-
-	if _, err := p.stdin.Write(data); err != nil {
-		return fmt.Errorf("writing to pi stdin: %w", err)
-	}
-
-	return nil
+	})
 }
 
 func (p *PiProcess) waitForResult(ctx context.Context) (string, error) {
@@ -350,18 +462,9 @@ func (p *PiProcess) waitForResult(ctx context.Context) (string, error) {
 }
 
 func (p *PiProcess) sendAbort() {
-	abort := map[string]string{"type": "abort"}
-
-	abortData, err := json.Marshal(abort)
-	if err != nil {
-		slog.Warn("failed to marshal abort command", "error", err)
-
-		return
+	if err := p.sendCommand(map[string]string{"type": "abort"}); err != nil {
+		slog.Warn("failed to send abort command", "error", err)
 	}
-
-	abortData = append(abortData, '\n')
-
-	_, _ = p.stdin.Write(abortData)
 }
 
 // readUntilAgentEnd reads JSON events from stdout until agent_end is received.

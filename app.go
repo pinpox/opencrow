@@ -70,6 +70,8 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 		a.handleRestart(ctx, msg)
 	case "!stop":
 		a.handleStop(ctx, msg)
+	case "!compact":
+		a.handleCompact(ctx, msg)
 	case "!skills":
 		a.handleSkills(ctx, msg)
 	default:
@@ -82,6 +84,7 @@ func (a *App) handleHelp(ctx context.Context, msg backend.Message) {
 		"  !help    — Show this help message\n" +
 		"  !restart — Kill the current session and start fresh\n" +
 		"  !stop    — Abort the currently running agent turn\n" +
+		"  !compact — Compact conversation context to reduce token usage\n" +
 		"  !skills  — List loaded skills"
 	a.backend.SendMessage(ctx, msg.ConversationID, help, "")
 }
@@ -105,6 +108,26 @@ func (a *App) handleStop(ctx context.Context, msg backend.Message) {
 	} else {
 		a.backend.SendMessage(ctx, msg.ConversationID, "Nothing running to stop.", "")
 	}
+}
+
+func (a *App) handleCompact(ctx context.Context, msg backend.Message) {
+	pi := a.pool.GetExisting(msg.ConversationID)
+	if pi == nil {
+		a.backend.SendMessage(ctx, msg.ConversationID, "No active session to compact.", "")
+
+		return
+	}
+
+	result, err := pi.Compact(ctx)
+	if err != nil {
+		slog.Error("compact failed", "conversation", msg.ConversationID, "error", err)
+		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Compaction failed: %v", err), "")
+
+		return
+	}
+
+	reply := fmt.Sprintf("Compacted conversation (was %d tokens).\nSummary: %s", result.TokensBefore, result.Summary)
+	a.backend.SendMessage(ctx, msg.ConversationID, reply, "")
 }
 
 func (a *App) handleSkills(ctx context.Context, msg backend.Message) {

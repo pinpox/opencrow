@@ -53,6 +53,19 @@ func (pool *PiPool) Get(ctx context.Context, roomID string) (*PiProcess, error) 
 	return p, nil
 }
 
+// GetExisting returns a live pi process for the room, or nil if none exists.
+// Unlike Get, it never spawns a new process.
+func (pool *PiPool) GetExisting(roomID string) *PiProcess {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	if p, ok := pool.processes[roomID]; ok && p.IsAlive() {
+		return p
+	}
+
+	return nil
+}
+
 // Remove kills and removes the pi process for a room.
 // This is called on errors so the next message gets a fresh process.
 func (pool *PiPool) Remove(roomID string) {

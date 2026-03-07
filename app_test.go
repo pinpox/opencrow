@@ -76,6 +76,32 @@ func (m *mockBackend) SystemPromptExtra() string {
 	return m.systemPromptExtraText
 }
 
+func TestApp_Compact_NoSession(t *testing.T) {
+	t.Parallel()
+
+	mb := &mockBackend{}
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app := NewApp(mb, pool, nil, t.TempDir())
+
+	ctx := context.Background()
+	app.HandleMessage(ctx, backend.Message{
+		ConversationID: testRoom,
+		SenderID:       "@user:example.com",
+		Text:           "!compact",
+	})
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if len(mb.sentMessages) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+	}
+
+	if !strings.Contains(mb.sentMessages[0].text, "No active session") {
+		t.Errorf("expected 'No active session' message, got %q", mb.sentMessages[0].text)
+	}
+}
+
 func TestApp_Help(t *testing.T) {
 	t.Parallel()
 
@@ -102,7 +128,7 @@ func TestApp_Help(t *testing.T) {
 		t.Errorf("sent to %q, want %q", msg.conversationID, testRoom)
 	}
 
-	for _, cmd := range []string{"!help", "!restart", "!stop", "!skills"} {
+	for _, cmd := range []string{"!help", "!restart", "!stop", "!compact", "!skills"} {
 		if !strings.Contains(msg.text, cmd) {
 			t.Errorf("help text missing %q", cmd)
 		}
