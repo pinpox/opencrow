@@ -187,15 +187,7 @@ func (t *TriggerPipeManager) processTrigger(ctx context.Context, roomID, content
 		return
 	}
 
-	if containsHeartbeatOK(reply) {
-		slog.Info("trigger: HEARTBEAT_OK, suppressing")
-
-		return
-	}
-
-	if reply == "" {
-		slog.Info("trigger: empty response, suppressing")
-
+	if shouldSuppressReply(reply, "trigger") {
 		return
 	}
 
