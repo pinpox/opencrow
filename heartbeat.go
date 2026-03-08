@@ -153,7 +153,7 @@ func (h *HeartbeatScheduler) readHeartbeatContent() string {
 	heartbeatPath := filepath.Join(h.piCfg.SessionDir, "HEARTBEAT.md")
 
 	heartbeatContent, err := os.ReadFile(heartbeatPath)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn("failed to read HEARTBEAT.md", "path", heartbeatPath, "error", err)
 	}
 

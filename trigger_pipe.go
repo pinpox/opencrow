@@ -223,7 +223,7 @@ func ensureFIFO(path string) error {
 		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("removing non-FIFO at %s: %w", path, err)
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("checking FIFO at %s: %w", path, err)
 	}
 

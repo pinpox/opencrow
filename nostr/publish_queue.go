@@ -3,6 +3,7 @@ package nostr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -350,7 +351,7 @@ func (q *publishQueue) load() error {
 	}
 
 	data, err := os.ReadFile(filepath.Join(q.dataDir, publishQueueFile))
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 
