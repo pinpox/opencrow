@@ -362,6 +362,9 @@ func (b *Backend) ensureCrossSigning(ctx context.Context) error {
 		return fmt.Errorf("generating cross-signing keys: %w", err)
 	}
 
+	// The recovery key ends up in journald, but so do pi's plaintext
+	// session files — filesystem access already implies full message
+	// access regardless.
 	slog.Info("cross-signing setup complete, store this recovery key securely", "recovery_key", recoveryKey)
 
 	return nil
