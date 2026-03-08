@@ -44,6 +44,7 @@ func newFakePiProcess(t *testing.T) (*PiProcess, *os.File) {
 
 	go func() {
 		_ = cmd.Wait()
+
 		close(done)
 	}()
 
@@ -120,6 +121,7 @@ func TestTriggerAbortDoesNotKillProcess(t *testing.T) {
 
 	go func() {
 		defer close(triggerDone)
+
 		triggerMgr.processTrigger(context.Background(), roomID, "calendar update")
 	}()
 
