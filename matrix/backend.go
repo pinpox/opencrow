@@ -664,11 +664,26 @@ func attachmentDestPath(sessionBaseDir string, msg *event.MessageEventContent) (
 	return f.Name(), nil
 }
 
+// maxDownloadSize caps the amount of data we download for a single attachment.
+// 50 MiB is generous for images and documents while preventing abuse from
+// multi-gigabyte payloads that could exhaust disk space or memory.
+const maxDownloadSize = 50 << 20 // 50 MiB
+
 // downloadEncrypted downloads and decrypts an encrypted Matrix attachment.
 func (b *Backend) downloadEncrypted(ctx context.Context, mxcURL id.ContentURI, msg *event.MessageEventContent, destPath string) error {
-	ciphertext, err := b.client.DownloadBytes(ctx, mxcURL)
+	resp, err := b.client.Download(ctx, mxcURL)
 	if err != nil {
 		return fmt.Errorf("downloading encrypted media: %w", err)
+	}
+	defer resp.Body.Close()
+
+	ciphertext, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize+1))
+	if err != nil {
+		return fmt.Errorf("reading encrypted media: %w", err)
+	}
+
+	if len(ciphertext) > maxDownloadSize {
+		return fmt.Errorf("encrypted attachment exceeds maximum size of %d bytes", maxDownloadSize)
 	}
 
 	if err := msg.File.DecryptInPlace(ciphertext); err != nil {
@@ -700,8 +715,18 @@ func (b *Backend) downloadPlain(ctx context.Context, mxcURL id.ContentURI, destP
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	limited := io.LimitReader(resp.Body, maxDownloadSize+1)
+
+	n, err := io.Copy(f, limited)
+	if err != nil {
 		return fmt.Errorf("writing file: %w", err)
+	}
+
+	if n > maxDownloadSize {
+		f.Close()
+		os.Remove(destPath)
+
+		return fmt.Errorf("attachment exceeds maximum size of %d bytes", maxDownloadSize)
 	}
 
 	return nil
