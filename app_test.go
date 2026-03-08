@@ -93,6 +93,8 @@ func newTestAppWithBackend(t *testing.T, mb *mockBackend) (*App, *mockBackend) {
 		t.Fatal(err)
 	}
 
+	t.Cleanup(func() { app.Close() })
+
 	return app, mb
 }
 

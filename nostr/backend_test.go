@@ -797,6 +797,8 @@ func newTestBackendWithHandler(t *testing.T, sk gonostr.SecretKey, relays []stri
 		t.Fatal(err)
 	}
 
+	t.Cleanup(func() { b.Close() })
+
 	return b
 }
 
@@ -812,6 +814,8 @@ func newTestBackendWithSessionDir(t *testing.T, sk gonostr.SecretKey, relays []s
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	t.Cleanup(func() { b.Close() })
 
 	return b
 }

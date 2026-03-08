@@ -32,6 +32,8 @@ func newBlossomTestBackend(t *testing.T, servers []string) *Backend {
 		t.Fatal(err)
 	}
 
+	t.Cleanup(func() { b.Close() })
+
 	return b
 }
 
