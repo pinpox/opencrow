@@ -401,11 +401,6 @@ in
         {
           system.stateVersion = "25.05";
 
-          # Work around broken pam_lastlog2.so missing libpam linkage in systemd 259
-          # https://github.com/NixOS/nixpkgs/issues/493934
-          # TODO: remove once https://github.com/NixOS/nixpkgs/pull/495347 lands in nixos-unstable
-          security.pam.services.login.updateWtmp = lib.mkForce false;
-
           users.users.opencrow = {
             isSystemUser = true;
             group = "opencrow";
