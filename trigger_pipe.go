@@ -141,10 +141,10 @@ func (t *TriggerPipeManager) readLoop(ctx context.Context, roomID, pipePath stri
 	defer f.Close()
 
 	// Watch for context cancellation and close the fd to unblock the scanner.
-	go func() {
-		<-ctx.Done()
-		f.Close()
-	}()
+	// Capture stop so we can unregister the callback on normal exit,
+	// avoiding a double-close if the context outlives the loop.
+	stop := context.AfterFunc(ctx, func() { f.Close() })
+	defer stop()
 
 	scanner := bufio.NewScanner(f)
 
