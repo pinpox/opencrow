@@ -115,10 +115,11 @@ func (t *TriggerPipeManager) stopAll() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	for roomID, cancel := range t.readers {
+	for _, cancel := range t.readers {
 		cancel()
-		delete(t.readers, roomID)
 	}
+
+	clear(t.readers)
 }
 
 // readLoop is a per-room goroutine that reads lines from a named pipe

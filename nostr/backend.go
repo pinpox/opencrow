@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -455,19 +456,15 @@ func (b *Backend) pruneSeen() {
 	cutoff := time.Now().Add(-b.seenTTL)
 
 	b.seenMu.Lock()
-	for id, t := range b.seenGiftWrap {
-		if t.Before(cutoff) {
-			delete(b.seenGiftWrap, id)
-		}
-	}
+	maps.DeleteFunc(b.seenGiftWrap, func(_ gonostr.ID, t time.Time) bool {
+		return t.Before(cutoff)
+	})
 	b.seenMu.Unlock()
 
 	b.seenRumorsMu.Lock()
-	for id, t := range b.seenRumors {
-		if t.Before(cutoff) {
-			delete(b.seenRumors, id)
-		}
-	}
+	maps.DeleteFunc(b.seenRumors, func(_ string, t time.Time) bool {
+		return t.Before(cutoff)
+	})
 
 	saveSeenRumors(b.cfg.SessionBaseDir, b.seenRumors)
 	b.seenRumorsMu.Unlock()
