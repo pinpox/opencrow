@@ -100,8 +100,7 @@ func (pool *PiPool) Rooms() []string {
 func (pool *PiPool) StopAll() {
 	pool.mu.Lock()
 
-	procs := make(map[string]*PiProcess, len(pool.processes))
-	maps.Copy(procs, pool.processes)
+	procs := maps.Clone(pool.processes)
 
 	pool.processes = make(map[string]*PiProcess)
 	pool.mu.Unlock()
