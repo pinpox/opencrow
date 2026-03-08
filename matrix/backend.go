@@ -631,7 +631,9 @@ func attachmentURL(msg *event.MessageEventContent) (id.ContentURIString, bool) {
 	}
 }
 
-// attachmentDestPath builds the local filesystem path for a downloaded attachment.
+// attachmentDestPath creates a unique file path for a downloaded attachment.
+// It uses os.CreateTemp to avoid collisions when multiple attachments share
+// the same filename.
 func attachmentDestPath(sessionBaseDir string, msg *event.MessageEventContent) (string, error) {
 	downloadDir := filepath.Join(sessionBaseDir, "attachments")
 	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
@@ -649,7 +651,17 @@ func attachmentDestPath(sessionBaseDir string, msg *event.MessageEventContent) (
 
 	filename = filepath.Base(filename)
 
-	return filepath.Join(downloadDir, filename), nil
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	pattern := base + "_*" + ext
+
+	f, err := os.CreateTemp(downloadDir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("creating attachment file: %w", err)
+	}
+	f.Close()
+
+	return f.Name(), nil
 }
 
 // downloadEncrypted downloads and decrypts an encrypted Matrix attachment.
