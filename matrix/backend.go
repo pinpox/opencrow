@@ -609,10 +609,14 @@ func (b *Backend) downloadAttachment(ctx context.Context, msg *event.MessageEven
 	switch {
 	case encrypted:
 		if err := b.downloadEncrypted(ctx, mxcURL, msg, destPath); err != nil {
+			os.Remove(destPath)
+
 			return "", err
 		}
 	default:
 		if err := b.downloadPlain(ctx, mxcURL, destPath); err != nil {
+			os.Remove(destPath)
+
 			return "", err
 		}
 	}
@@ -662,7 +666,12 @@ func attachmentDestPath(sessionBaseDir string, msg *event.MessageEventContent) (
 	if err != nil {
 		return "", fmt.Errorf("creating attachment file: %w", err)
 	}
-	f.Close()
+
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+
+		return "", fmt.Errorf("closing attachment file: %w", err)
+	}
 
 	return f.Name(), nil
 }
