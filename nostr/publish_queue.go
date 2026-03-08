@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -295,17 +296,9 @@ func (q *publishQueue) publishToRelay(ctx context.Context, relayURL string, evt 
 // cleanupLocked removes items that have no remaining failed relays.
 // Must be called with q.mu held.
 func (q *publishQueue) cleanupLocked() {
-	kept := make([]*publishItem, 0, len(q.items))
-
-	for _, item := range q.items {
-		if len(item.FailedRelays) == 0 {
-			continue
-		}
-
-		kept = append(kept, item)
-	}
-
-	q.items = kept
+	q.items = slices.DeleteFunc(q.items, func(item *publishItem) bool {
+		return len(item.FailedRelays) == 0
+	})
 }
 
 // run drains the queue until ctx is cancelled. It sleeps when idle and
