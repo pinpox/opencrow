@@ -743,4 +743,3 @@ func (b *Backend) downloadPlain(ctx context.Context, mxcURL id.ContentURI, destP
 
 	return nil
 }
-

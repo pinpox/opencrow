@@ -287,47 +287,6 @@ func TestResetConversation(t *testing.T) {
 	}
 }
 
-func TestSeenRumorsPersistence(t *testing.T) {
-	t.Parallel()
-
-	wsURL, cleanup := testutil.StartTestRelay(t)
-	defer cleanup()
-
-	botSK := gonostr.Generate()
-	senderSK := gonostr.Generate()
-	sessionDir := t.TempDir()
-
-	c := &messageCollector{}
-
-	b, err := NewBackend(Config{
-		PrivateKey:     botSK.Hex(),
-		Relays:         []string{wsURL},
-		AllowedUsers:   make(map[string]struct{}),
-		SessionBaseDir: sessionDir,
-	}, c.handler)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	runErr := runBackendAsync(ctx, b)
-
-	time.Sleep(300 * time.Millisecond)
-
-	sendTestDM(ctx, t, wsURL, senderSK, b.keys.PK, "first message")
-	waitForMessages(t, c, 1)
-
-	cancel()
-	<-runErr
-
-	seen := loadSeenRumors(sessionDir, 7*24*time.Hour)
-	if len(seen) == 0 {
-		t.Fatal("no seen rumors persisted to disk")
-	}
-}
-
 func TestRestartDropsStaleMessages(t *testing.T) {
 	t.Parallel()
 
@@ -828,7 +787,7 @@ func newTestBackendWithHandler(t *testing.T, sk gonostr.SecretKey, relays []stri
 		allowedUsers = make(map[string]struct{})
 	}
 
-	b, err := NewBackend(Config{
+	b, err := NewBackend(context.Background(), Config{
 		PrivateKey:     sk.Hex(),
 		Relays:         relays,
 		AllowedUsers:   allowedUsers,
@@ -838,13 +797,15 @@ func newTestBackendWithHandler(t *testing.T, sk gonostr.SecretKey, relays []stri
 		t.Fatal(err)
 	}
 
+	t.Cleanup(func() { b.Close() })
+
 	return b
 }
 
 func newTestBackendWithSessionDir(t *testing.T, sk gonostr.SecretKey, relays []string, sessionDir string, handler backend.MessageHandler) *Backend {
 	t.Helper()
 
-	b, err := NewBackend(Config{
+	b, err := NewBackend(context.Background(), Config{
 		PrivateKey:     sk.Hex(),
 		Relays:         relays,
 		AllowedUsers:   make(map[string]struct{}),
@@ -853,6 +814,8 @@ func newTestBackendWithSessionDir(t *testing.T, sk gonostr.SecretKey, relays []s
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	t.Cleanup(func() { b.Close() })
 
 	return b
 }

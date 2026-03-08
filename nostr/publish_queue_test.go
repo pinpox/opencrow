@@ -2,9 +2,6 @@ package nostr
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -23,19 +20,22 @@ func TestPublishQueue_EnqueueAndDrain(t *testing.T) {
 	pool := gonostr.NewPool(gonostr.PoolOptions{})
 	defer pool.Close("test done")
 
+	ctx := context.Background()
+
 	q := mustNewPublishQueue(t, t.TempDir())
+	defer q.db.Close()
+
 	q.setPool(pool)
 
 	evt := signTestEvent(t)
 
-	q.enqueue(evt, []string{wsURL}, "test")
+	q.enqueue(ctx, evt, []string{wsURL}, "test")
 
 	if q.Len() != 1 {
 		t.Fatalf("queue length = %d, want 1", q.Len())
 	}
 
 	// Items are due immediately, so drain should publish them.
-	ctx := context.Background()
 	q.drainOnce(ctx)
 
 	if q.Len() != 0 {
@@ -73,16 +73,20 @@ func TestPublishQueue_PartialSuccess_DeliveredNotPersisted(t *testing.T) {
 	pool := gonostr.NewPool(gonostr.PoolOptions{})
 	defer pool.Close("test done")
 
+	ctx := context.Background()
+
 	dir := t.TempDir()
+
 	q := mustNewPublishQueue(t, dir)
+	defer q.db.Close()
+
 	q.setPool(pool)
 
 	evt := signTestEvent(t)
 
 	// Enqueue to one good relay and one unreachable relay.
-	q.enqueue(evt, []string{goodURL, unreachableRelay}, "test")
+	q.enqueue(ctx, evt, []string{goodURL, unreachableRelay}, "test")
 
-	ctx := context.Background()
 	q.drainOnce(ctx)
 
 	// Good relay succeeded → item is delivered. Bad relay still pending.
@@ -94,22 +98,16 @@ func TestPublishQueue_PartialSuccess_DeliveredNotPersisted(t *testing.T) {
 	if !q.items[0].Delivered {
 		t.Error("item should be marked as delivered (one relay succeeded)")
 	}
-
 	q.mu.Unlock()
 
-	// Delivered items should NOT be persisted to disk.
-	data, err := os.ReadFile(filepath.Join(dir, publishQueueFile))
+	// Delivered items should NOT be persisted in the DB.
+	rows, err := q.db.queries.ListPublishQueue(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var persisted []*publishItem
-	if err := json.Unmarshal(data, &persisted); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(persisted) != 0 {
-		t.Errorf("persisted %d items, want 0 (delivered items should not be persisted)", len(persisted))
+	if len(rows) != 0 {
+		t.Errorf("persisted %d items, want 0 (delivered items should not be persisted)", len(rows))
 	}
 }
 
@@ -124,7 +122,7 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 
 	q1 := mustNewPublishQueue(t, dir)
 	q1.setPool(pool1)
-	q1.enqueue(evt, []string{unreachableRelay}, "test")
+	q1.enqueue(context.Background(), evt, []string{unreachableRelay}, "test")
 	q1.drainOnce(context.Background())
 
 	if q1.Len() != 1 {
@@ -132,8 +130,9 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	}
 
 	pool1.Close("first run done")
+	q1.db.Close()
 
-	// Second "run": load from disk, verify the item survived.
+	// Second "run": load from DB, verify the item survived.
 	q2 := mustNewPublishQueue(t, dir)
 
 	if q2.Len() != 1 {
@@ -151,6 +150,8 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	if loaded.Delivered {
 		t.Error("loaded item should not be marked as delivered")
 	}
+
+	q2.db.Close()
 }
 
 func TestPublishQueue_BackoffCapsAtMax(t *testing.T) {
@@ -176,11 +177,16 @@ func TestPublishQueue_BackoffCapsAtMax(t *testing.T) {
 	}
 }
 
-// signTestEvent creates and signs a minimal kind 0 event for testing.
+// mustNewPublishQueue opens a DB in dataDir and creates a publish queue.
 func mustNewPublishQueue(t *testing.T, dataDir string) *publishQueue {
 	t.Helper()
 
-	q, err := newPublishQueue(dataDir)
+	db, err := OpenDB(context.Background(), dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	q, err := newPublishQueue(context.Background(), db)
 	if err != nil {
 		t.Fatal(err)
 	}

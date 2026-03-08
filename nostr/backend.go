@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +42,7 @@ type Backend struct {
 	cfg     Config
 	pool    *gonostr.Pool
 	handler backend.MessageHandler
+	db      *DB
 
 	cancelMu sync.Mutex
 	cancelFn context.CancelFunc
@@ -51,14 +51,7 @@ type Backend struct {
 	activeMu     sync.Mutex
 	activeConvID string
 
-	// Dedup received gift wrap events by ID (in-memory, handles multi-relay duplicates).
-	seenMu       sync.Mutex
-	seenGiftWrap map[gonostr.ID]time.Time
-
-	// Dedup processed rumor IDs (persisted to disk, survives restarts).
-	seenRumorsMu sync.Mutex
-	seenRumors   map[string]time.Time
-	seenTTL      time.Duration
+	seenTTL time.Duration
 
 	// Persistent retry queue for failed publishes.
 	pubQueue *publishQueue
@@ -69,7 +62,7 @@ type Backend struct {
 }
 
 // NewBackend creates a new Nostr backend. The keys are derived from cfg.PrivateKey.
-func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
+func NewBackend(ctx context.Context, cfg Config, handler backend.MessageHandler) (*Backend, error) {
 	keys, err := loadKeys(cfg.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("nostr: failed to load keys: %w", err)
@@ -82,19 +75,27 @@ func NewBackend(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 
 	ttl := 7 * 24 * time.Hour // 7 days — covers NIP-59 randomization window with margin
 
-	pq, err := newPublishQueue(cfg.SessionBaseDir)
+	db, err := OpenDB(ctx, cfg.SessionBaseDir)
 	if err != nil {
+		return nil, fmt.Errorf("nostr: opening db: %w", err)
+	}
+
+	migrateLegacySeenRumors(ctx, db, cfg.SessionBaseDir)
+
+	pq, err := newPublishQueue(ctx, db)
+	if err != nil {
+		db.Close()
+
 		return nil, fmt.Errorf("loading publish queue: %w", err)
 	}
 
 	return &Backend{
-		keys:         keys,
-		cfg:          cfg,
-		handler:      handler,
-		seenGiftWrap: make(map[gonostr.ID]time.Time),
-		seenRumors:   loadSeenRumors(cfg.SessionBaseDir, ttl),
-		seenTTL:      ttl,
-		pubQueue:     pq,
+		keys:     keys,
+		cfg:      cfg,
+		handler:  handler,
+		db:       db,
+		seenTTL:  ttl,
+		pubQueue: pq,
 	}, nil
 }
 
@@ -128,9 +129,9 @@ func (b *Backend) Run(ctx context.Context) error {
 	// they don't know the recipient's, so we need to listen on those too.
 	subRelays := b.discoverSubscriptionRelays(ctx)
 
-	since := sinceFromSeenRumors(b.seenRumors)
+	since := subscriptionSince(ctx, b.db)
 
-	slog.Info("nostr: subscribing to DMs", "pubkey", b.keys.PK.Hex(), "since", since, "seen_rumors", len(b.seenRumors), "relays", subRelays)
+	slog.Info("nostr: subscribing to DMs", "pubkey", b.keys.PK.Hex(), "since", since, "relays", subRelays)
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -180,13 +181,13 @@ func (b *Backend) Stop() {
 	b.cancelMu.Unlock()
 }
 
-// Close releases relay connections.
+// Close releases relay connections and the database.
 func (b *Backend) Close() error {
 	if b.pool != nil {
 		b.pool.Close("backend closed")
 	}
 
-	return nil
+	return b.db.Close()
 }
 
 // SendMessage sends a NIP-17 gift-wrapped DM. When replyToID is non-empty,
@@ -360,7 +361,7 @@ func (b *Backend) discoverUserDMRelays(ctx context.Context, seen map[string]stru
 
 // publishProfile publishes a NIP-01 kind 0 metadata event so the bot
 // has a visible name, about, and picture on Nostr clients.
-func (b *Backend) publishProfile(_ context.Context) {
+func (b *Backend) publishProfile(ctx context.Context) {
 	p := b.cfg.Profile
 	if p.Name == "" && p.DisplayName == "" && p.About == "" && p.Picture == "" {
 		return
@@ -387,7 +388,7 @@ func (b *Backend) publishProfile(_ context.Context) {
 		return
 	}
 
-	b.publishToRelays(evt, b.cfg.Relays, "profile")
+	b.publishToRelays(ctx, evt, b.cfg.Relays, "profile")
 }
 
 // buildProfileMeta constructs the metadata map from non-empty profile fields.
@@ -416,7 +417,7 @@ func buildProfileMeta(p ProfileConfig) map[string]string {
 // clients can discover where to send gift-wrapped DMs to this bot.
 // Uses DMRelays (not Relays) because some general-purpose relays silently
 // drop kind 1059 gift wraps.
-func (b *Backend) publishDMRelayList(_ context.Context) {
+func (b *Backend) publishDMRelayList(ctx context.Context) {
 	tags := make(gonostr.Tags, 0, len(b.cfg.DMRelays))
 	for _, relay := range b.cfg.DMRelays {
 		tags = append(tags, gonostr.Tag{"relay", relay})
@@ -434,10 +435,10 @@ func (b *Backend) publishDMRelayList(_ context.Context) {
 		return
 	}
 
-	b.publishToRelays(evt, b.cfg.Relays, "DM relay list")
+	b.publishToRelays(ctx, evt, b.cfg.Relays, "DM relay list")
 }
 
-// pruneSeenLoop prunes stale entries from both dedup sets.
+// pruneSeenLoop periodically removes stale entries from the seen_rumors table.
 func (b *Backend) pruneSeenLoop(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
@@ -447,27 +448,9 @@ func (b *Backend) pruneSeenLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			b.pruneSeen()
+			pruneStaleSeenRumors(ctx, b.db, b.seenTTL)
 		}
 	}
-}
-
-func (b *Backend) pruneSeen() {
-	cutoff := time.Now().Add(-b.seenTTL)
-
-	b.seenMu.Lock()
-	maps.DeleteFunc(b.seenGiftWrap, func(_ gonostr.ID, t time.Time) bool {
-		return t.Before(cutoff)
-	})
-	b.seenMu.Unlock()
-
-	b.seenRumorsMu.Lock()
-	maps.DeleteFunc(b.seenRumors, func(_ string, t time.Time) bool {
-		return t.Before(cutoff)
-	})
-
-	saveSeenRumors(b.cfg.SessionBaseDir, b.seenRumors)
-	b.seenRumorsMu.Unlock()
 }
 
 // processGiftWrap unwraps a kind 1059 event and dispatches to the handler.
@@ -477,10 +460,6 @@ func (b *Backend) processGiftWrap(ctx, pubCtx context.Context, evt *gonostr.Even
 	}
 
 	slog.Debug("nostr: processing gift wrap", "event_id", evt.ID.Hex(), "event_kind", evt.Kind)
-
-	if !b.dedupGiftWrap(evt.ID) {
-		return
-	}
 
 	rumor, err := nip59.GiftUnwrap(*evt,
 		func(otherpubkey gonostr.PubKey, ciphertext string) (string, error) {
@@ -493,7 +472,7 @@ func (b *Backend) processGiftWrap(ctx, pubCtx context.Context, evt *gonostr.Even
 		return
 	}
 
-	if !b.dedupRumor(rumor.ID.Hex(), evt.ID.Hex()) {
+	if !b.dedupRumor(ctx, rumor.ID.Hex(), evt.ID.Hex()) {
 		return
 	}
 
@@ -530,35 +509,23 @@ func (b *Backend) processGiftWrap(ctx, pubCtx context.Context, evt *gonostr.Even
 	})
 }
 
-// dedupGiftWrap returns true if this gift wrap event has not been seen before.
-func (b *Backend) dedupGiftWrap(id gonostr.ID) bool {
-	b.seenMu.Lock()
-	defer b.seenMu.Unlock()
+// dedupRumor returns true if this rumor has not been processed before.
+// Uses the SQLite database as the authoritative dedup store.
+func (b *Backend) dedupRumor(ctx context.Context, rumorHex, evtHex string) bool {
+	// Check if already seen via a cheap upsert: if the row already existed,
+	// the INSERT is a no-op and we know it's a duplicate.
+	seen, err := checkAndMarkSeen(ctx, b.db, rumorHex)
+	if err != nil {
+		slog.Warn("nostr: dedup check failed, accepting rumor", "rumor_id", rumorHex, "error", err)
 
-	if _, ok := b.seenGiftWrap[id]; ok {
-		slog.Debug("nostr: dropping duplicate gift wrap", "event_id", id.Hex())
-
-		return false
+		return true
 	}
 
-	b.seenGiftWrap[id] = time.Now()
-
-	return true
-}
-
-// dedupRumor returns true if this rumor has not been processed before.
-func (b *Backend) dedupRumor(rumorHex, evtHex string) bool {
-	b.seenRumorsMu.Lock()
-	defer b.seenRumorsMu.Unlock()
-
-	if _, ok := b.seenRumors[rumorHex]; ok {
+	if seen {
 		slog.Debug("nostr: dropping already-processed rumor", "rumor_id", rumorHex, "event_id", evtHex)
 
 		return false
 	}
-
-	b.seenRumors[rumorHex] = time.Now()
-	saveSeenRumors(b.cfg.SessionBaseDir, b.seenRumors)
 
 	return true
 }

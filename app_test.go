@@ -76,19 +76,42 @@ func (m *mockBackend) SystemPromptExtra() string {
 	return m.systemPromptExtraText
 }
 
+// newTestApp creates a mockBackend + App wired together for testing.
+// The mockBackend is returned so tests can inspect recorded calls.
+func newTestApp(t *testing.T) (*App, *mockBackend) {
+	t.Helper()
+
+	return newTestAppWithBackend(t, &mockBackend{})
+}
+
+func newTestAppWithBackend(t *testing.T, mb *mockBackend) (*App, *mockBackend) {
+	t.Helper()
+
+	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
+	app, err := NewApp(context.Background(), mb, pool, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { app.Close() })
+
+	return app, mb
+}
+
+// sendCommand sends a command message from a default user to testRoom.
+func sendCommand(app *App, command string) {
+	app.HandleMessage(context.Background(), backend.Message{
+		ConversationID: testRoom,
+		SenderID:       "@user:example.com",
+		Text:           command,
+	})
+}
+
 func TestApp_Stop_NoSession(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
-
-	ctx := context.Background()
-	app.HandleMessage(ctx, backend.Message{
-		ConversationID: testRoom,
-		SenderID:       "@user:example.com",
-		Text:           "!stop",
-	})
+	app, mb := newTestApp(t)
+	sendCommand(app, "!stop")
 
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -105,16 +128,8 @@ func TestApp_Stop_NoSession(t *testing.T) {
 func TestApp_Compact_NoSession(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
-
-	ctx := context.Background()
-	app.HandleMessage(ctx, backend.Message{
-		ConversationID: testRoom,
-		SenderID:       "@user:example.com",
-		Text:           "!compact",
-	})
+	app, mb := newTestApp(t)
+	sendCommand(app, "!compact")
 
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -131,16 +146,8 @@ func TestApp_Compact_NoSession(t *testing.T) {
 func TestApp_Help(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
-
-	ctx := context.Background()
-	app.HandleMessage(ctx, backend.Message{
-		ConversationID: testRoom,
-		SenderID:       "@user:example.com",
-		Text:           "!help",
-	})
+	app, mb := newTestApp(t)
+	sendCommand(app, "!help")
 
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -164,16 +171,8 @@ func TestApp_Help(t *testing.T) {
 func TestApp_Restart(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
-
-	ctx := context.Background()
-	app.HandleMessage(ctx, backend.Message{
-		ConversationID: testRoom,
-		SenderID:       "@user:example.com",
-		Text:           "!restart",
-	})
+	app, mb := newTestApp(t)
+	sendCommand(app, "!restart")
 
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -194,16 +193,8 @@ func TestApp_Restart(t *testing.T) {
 func TestApp_Skills(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
-
-	ctx := context.Background()
-	app.HandleMessage(ctx, backend.Message{
-		ConversationID: testRoom,
-		SenderID:       "@user:example.com",
-		Text:           "!skills",
-	})
+	app, mb := newTestApp(t)
+	sendCommand(app, "!skills")
 
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -216,12 +207,12 @@ func TestApp_Skills(t *testing.T) {
 func TestApp_BuildPromptText_ReplyToUserMessage(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
+	app, _ := newTestApp(t)
+
+	ctx := context.Background()
 
 	// Record a user message as HandleMessage would.
-	app.sent.Put("conv1", "user-msg-123", "original question")
+	app.sent.Put(ctx, "conv1", "user-msg-123", "original question")
 
 	// Now simulate the user replying to their own message.
 	replyMsg := backend.Message{
@@ -232,7 +223,7 @@ func TestApp_BuildPromptText_ReplyToUserMessage(t *testing.T) {
 		ReplyToID:      "user-msg-123",
 	}
 
-	got := app.buildPromptText(replyMsg)
+	got := app.buildPromptText(ctx, replyMsg)
 	want := `[user replied to message: "original question"]
 follow-up`
 
@@ -244,9 +235,7 @@ follow-up`
 func TestApp_SystemPrompt(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{systemPromptExtraText: "You are in a Nostr DM."}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
+	app, _ := newTestAppWithBackend(t, &mockBackend{systemPromptExtraText: "You are in a Nostr DM."})
 
 	got := app.systemPrompt("Base prompt")
 
@@ -259,9 +248,7 @@ func TestApp_SystemPrompt(t *testing.T) {
 func TestApp_SystemPrompt_NoExtra(t *testing.T) {
 	t.Parallel()
 
-	mb := &mockBackend{}
-	pool := NewPiPool(PiConfig{SessionDir: t.TempDir()})
-	app := NewApp(mb, pool, nil, t.TempDir())
+	app, _ := newTestApp(t)
 
 	got := app.systemPrompt("Base prompt")
 	if got != "Base prompt" {

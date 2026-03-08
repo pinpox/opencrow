@@ -15,6 +15,40 @@ import (
 	"github.com/pinpox/opencrow/backend"
 )
 
+// newBlossomTestBackend creates a Backend configured with the given blossom servers.
+func newBlossomTestBackend(t *testing.T, servers []string) *Backend {
+	t.Helper()
+
+	botSK := gonostr.Generate()
+
+	b, err := NewBackend(context.Background(), Config{
+		PrivateKey:     botSK.Hex(),
+		Relays:         []string{},
+		BlossomServers: servers,
+		AllowedUsers:   make(map[string]struct{}),
+		SessionBaseDir: t.TempDir(),
+	}, func(context.Context, backend.Message) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { b.Close() })
+
+	return b
+}
+
+// writeTempFile creates a temporary file with the given content and returns its path.
+func writeTempFile(t *testing.T, name string, data []byte) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
 func TestSendFile_UploadsToBlossom(t *testing.T) {
 	t.Parallel()
 
@@ -33,24 +67,8 @@ func TestSendFile_UploadsToBlossom(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	botSK := gonostr.Generate()
-
-	b, err := NewBackend(Config{
-		PrivateKey:     botSK.Hex(),
-		Relays:         []string{},
-		BlossomServers: []string{srv.URL},
-		AllowedUsers:   make(map[string]struct{}),
-		SessionBaseDir: t.TempDir(),
-	}, func(context.Context, backend.Message) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a test file
-	tmpFile := filepath.Join(t.TempDir(), "test.png")
-	if err := os.WriteFile(tmpFile, []byte("fake image data"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	b := newBlossomTestBackend(t, []string{srv.URL})
+	tmpFile := writeTempFile(t, "test.png", []byte("fake image data"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -85,23 +103,8 @@ func TestSendFile_BlossomFallback(t *testing.T) {
 	}))
 	defer srv2.Close()
 
-	botSK := gonostr.Generate()
-
-	b, err := NewBackend(Config{
-		PrivateKey:     botSK.Hex(),
-		Relays:         []string{},
-		BlossomServers: []string{srv1.URL, srv2.URL},
-		AllowedUsers:   make(map[string]struct{}),
-		SessionBaseDir: t.TempDir(),
-	}, func(context.Context, backend.Message) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tmpFile := filepath.Join(t.TempDir(), "test.txt")
-	if err := os.WriteFile(tmpFile, []byte("data"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	b := newBlossomTestBackend(t, []string{srv1.URL, srv2.URL})
+	tmpFile := writeTempFile(t, "test.txt", []byte("data"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -204,28 +207,13 @@ func TestSendFile_AllBlossomsFail(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	botSK := gonostr.Generate()
-
-	b, err := NewBackend(Config{
-		PrivateKey:     botSK.Hex(),
-		Relays:         []string{},
-		BlossomServers: []string{srv.URL},
-		AllowedUsers:   make(map[string]struct{}),
-		SessionBaseDir: t.TempDir(),
-	}, func(context.Context, backend.Message) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tmpFile := filepath.Join(t.TempDir(), "test.txt")
-	if err := os.WriteFile(tmpFile, []byte("data"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	b := newBlossomTestBackend(t, []string{srv.URL})
+	tmpFile := writeTempFile(t, "test.txt", []byte("data"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err = b.uploadToBlossomImpl(ctx, tmpFile)
+	_, err := b.uploadToBlossomImpl(ctx, tmpFile)
 	if err == nil {
 		t.Fatal("expected error when all servers fail")
 	}

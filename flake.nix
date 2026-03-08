@@ -49,7 +49,10 @@
         {
           default = pkgs.mkShell {
             inputsFrom = [ self.packages.${system}.opencrow ];
-            packages = [ pkgs.golangci-lint ];
+            packages = [
+              pkgs.golangci-lint
+              pkgs.sqlc
+            ];
           };
         }
       );

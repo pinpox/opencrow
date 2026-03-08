@@ -47,13 +47,23 @@ type App struct {
 
 // NewApp creates a new App. dataDir is used for persistent state (e.g.,
 // sent message store). The triggerMgr may be nil if not used.
-func NewApp(b backend.Backend, pool *PiPool, triggerMgr *TriggerPipeManager, dataDir string) *App {
+func NewApp(ctx context.Context, b backend.Backend, pool *PiPool, triggerMgr *TriggerPipeManager, dataDir string) (*App, error) {
+	sent, err := newSentMessageStore(ctx, dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("initializing sent message store: %w", err)
+	}
+
 	return &App{
 		backend:    b,
 		pool:       pool,
 		triggerMgr: triggerMgr,
-		sent:       newSentMessageStore(dataDir),
-	}
+		sent:       sent,
+	}, nil
+}
+
+// Close releases resources held by the App.
+func (a *App) Close() error {
+	return a.sent.Close()
 }
 
 // HandleMessage is the backend.MessageHandler callback. It dispatches
@@ -61,7 +71,7 @@ func NewApp(b backend.Backend, pool *PiPool, triggerMgr *TriggerPipeManager, dat
 func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	// Record the incoming message so future reply-to references can quote it.
 	// Without this, replies to user messages would show "content unavailable".
-	a.sent.Put(msg.ConversationID, msg.MessageID, msg.Text)
+	a.sent.Put(ctx, msg.ConversationID, msg.MessageID, msg.Text)
 
 	switch msg.Text {
 	case "!help":
@@ -151,7 +161,7 @@ func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
 	}
 
 	toolCallFn := a.makeToolCallFn(ctx, msg.ConversationID)
-	promptText := a.buildPromptText(msg)
+	promptText := a.buildPromptText(ctx, msg)
 
 	reply := a.promptWithRetry(ctx, pi, msg.ConversationID, promptText, toolCallFn)
 
@@ -172,11 +182,11 @@ func (a *App) makeToolCallFn(ctx context.Context, conversationID string) func(To
 }
 
 // buildPromptText prepends reply-quote context to the message text.
-func (a *App) buildPromptText(msg backend.Message) string {
+func (a *App) buildPromptText(ctx context.Context, msg backend.Message) string {
 	promptText := msg.Text
 
 	if msg.ReplyToID != "" {
-		if quoted := a.sent.Get(msg.ConversationID, msg.ReplyToID); quoted != "" {
+		if quoted := a.sent.Get(ctx, msg.ConversationID, msg.ReplyToID); quoted != "" {
 			promptText = fmt.Sprintf("[user replied to message: %q]\n%s", quoted, promptText)
 		} else {
 			promptText = "[user replied to a message whose content is unavailable — ask for clarification if their message is unclear]\n" + promptText
@@ -240,7 +250,7 @@ func (a *App) sendReplyWithFiles(ctx context.Context, conversationID, reply, rep
 
 	if cleanReply != "" {
 		sentID := a.backend.SendMessage(ctx, conversationID, cleanReply, replyToID)
-		a.sent.Put(conversationID, sentID, cleanReply)
+		a.sent.Put(ctx, conversationID, sentID, cleanReply)
 	}
 }
 

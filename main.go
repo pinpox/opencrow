@@ -67,12 +67,16 @@ func wireServices(ctx context.Context, cfg *Config, pool *PiPool) (backend.Backe
 		app.HandleMessage(ctx, msg)
 	}
 
-	b, err := createBackend(cfg, pool, handler)
+	b, err := createBackend(ctx, cfg, pool, handler)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	app = NewApp(b, pool, nil, cfg.Pi.SessionDir)
+	app, err = NewApp(ctx, b, pool, nil, cfg.Pi.SessionDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	cfg.Pi.SystemPrompt = app.systemPrompt(cfg.Pi.SystemPrompt)
 
 	startSchedulers(ctx, cfg, pool, b, app)
@@ -80,12 +84,12 @@ func wireServices(ctx context.Context, cfg *Config, pool *PiPool) (backend.Backe
 	return b, app, nil
 }
 
-func createBackend(cfg *Config, pool *PiPool, handler backend.MessageHandler) (backend.Backend, error) { //nolint:ireturn // factory returns interface by design
+func createBackend(ctx context.Context, cfg *Config, pool *PiPool, handler backend.MessageHandler) (backend.Backend, error) { //nolint:ireturn // factory returns interface by design
 	switch cfg.BackendType {
 	case backendMatrix:
 		return createMatrixBackend(cfg, pool, handler)
 	case backendNostr:
-		return createNostrBackend(cfg, handler)
+		return createNostrBackend(ctx, cfg, handler)
 	default:
 		return nil, fmt.Errorf("unsupported backend type: %q", cfg.BackendType)
 	}
@@ -122,7 +126,9 @@ func setupShutdown(b backend.Backend, pool *PiPool, cancel context.CancelFunc) {
 	}()
 }
 
-func runBackend(ctx context.Context, b backend.Backend, _ *App) int {
+func runBackend(ctx context.Context, b backend.Backend, app *App) int {
+	defer app.Close()
+
 	if err := b.Run(ctx); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("shutdown complete")
@@ -164,7 +170,7 @@ func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandl
 	return b, nil
 }
 
-func createNostrBackend(cfg *Config, handler backend.MessageHandler) (*nostrbackend.Backend, error) {
+func createNostrBackend(ctx context.Context, cfg *Config, handler backend.MessageHandler) (*nostrbackend.Backend, error) {
 	nostrCfg := nostrbackend.Config{
 		PrivateKey:     cfg.Nostr.PrivateKey,
 		Relays:         cfg.Nostr.Relays,
@@ -180,7 +186,7 @@ func createNostrBackend(cfg *Config, handler backend.MessageHandler) (*nostrback
 		},
 	}
 
-	b, err := nostrbackend.NewBackend(nostrCfg, handler)
+	b, err := nostrbackend.NewBackend(ctx, nostrCfg, handler)
 	if err != nil {
 		return nil, fmt.Errorf("creating nostr backend: %w", err)
 	}

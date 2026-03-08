@@ -1,0 +1,14 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "sqlc/queries.sql"
+    schema: "sqlc/schema.sql"
+    gen:
+      go:
+        package: "main"
+        out: "."
+        emit_exact_table_names: true
+        output_db_file_name: "sqlc_db.go"
+        output_models_file_name: "sqlc_models.go"
+        output_querier_file_name: "sqlc_querier.go"
+        output_files_suffix: "_sqlc"

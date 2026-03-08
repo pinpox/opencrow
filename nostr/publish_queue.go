@@ -2,23 +2,18 @@ package nostr
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
-	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	gonostr "fiatjaf.com/nostr"
-	"github.com/pinpox/opencrow/atomicfile"
 )
 
 const (
-	publishQueueFile  = ".nostr_publish_queue"
 	initialBackoff    = 5 * time.Second
 	maxBackoff        = 5 * time.Minute
 	backoffMultiplier = 2.0
@@ -29,20 +24,22 @@ const (
 // Once at least one relay accepts the event, the item is removed from the
 // persistent queue (best-effort retries continue in-memory for remaining relays).
 type publishItem struct {
+	// dbID is the database row ID (0 for in-memory-only items).
+	dbID int64
 	// Event is the signed Nostr event to publish.
-	Event gonostr.Event `json:"event"`
+	Event gonostr.Event
 	// Relays is the full set of target relay URLs for this item.
-	Relays []string `json:"relays"`
+	Relays []string
 	// FailedRelays tracks which relays still need delivery.
-	FailedRelays []string `json:"failed_relays"`
+	FailedRelays []string
 	// Delivered is true once at least one relay accepted the event.
-	Delivered bool `json:"delivered"`
+	Delivered bool
 	// Attempts counts total publish rounds.
-	Attempts int `json:"attempts"`
+	Attempts int
 	// NextRetry is when this item should next be attempted.
-	NextRetry time.Time `json:"next_retry"`
+	NextRetry time.Time
 	// CreatedAt records when the item was first enqueued.
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time
 }
 
 // publishQueue is an outbox that all publishes go through. A background
@@ -55,7 +52,7 @@ type publishQueue struct {
 	items        []*publishItem
 	flushWaiters []flushWaiter // released once attemptGen advances past their snapshot
 	attemptGen   uint64        // incremented on every drain pass that tries items
-	dataDir      string
+	db           *DB
 	pool         *gonostr.Pool // set via setPool before calling run
 	wake         chan struct{} // signals the drain loop that new work arrived
 }
@@ -91,13 +88,13 @@ func (q *publishQueue) Flush(ctx context.Context) {
 	}
 }
 
-func newPublishQueue(dataDir string) (*publishQueue, error) {
+func newPublishQueue(ctx context.Context, db *DB) (*publishQueue, error) {
 	q := &publishQueue{
-		dataDir: dataDir,
-		wake:    make(chan struct{}, 1),
+		db:   db,
+		wake: make(chan struct{}, 1),
 	}
 
-	if err := q.load(); err != nil {
+	if err := q.load(ctx); err != nil {
 		return nil, err
 	}
 
@@ -118,7 +115,7 @@ func (q *publishQueue) setPool(pool *gonostr.Pool) {
 
 // enqueue adds an event to be published to the given relays. The drain
 // goroutine will handle the actual publishing.
-func (q *publishQueue) enqueue(evt gonostr.Event, relays []string, label string) {
+func (q *publishQueue) enqueue(ctx context.Context, evt gonostr.Event, relays []string, label string) {
 	if len(relays) == 0 {
 		return
 	}
@@ -135,7 +132,14 @@ func (q *publishQueue) enqueue(evt gonostr.Event, relays []string, label string)
 
 	q.mu.Lock()
 	q.items = append(q.items, item)
-	q.saveLocked()
+
+	if err := q.insertItemLocked(ctx, item); err != nil {
+		// Item stays in memory for delivery this process lifetime,
+		// but won't survive a crash.
+		slog.Warn("nostr: failed to persist publish queue item",
+			"label", label, "error", err)
+	}
+
 	q.mu.Unlock()
 
 	slog.Debug("nostr: enqueued for publish",
@@ -172,8 +176,7 @@ func (q *publishQueue) drainOnce(ctx context.Context) time.Duration {
 
 	q.mu.Lock()
 	q.attemptGen++
-	q.cleanupLocked()
-	q.saveLocked()
+	q.cleanupLocked(ctx)
 	q.mu.Unlock()
 
 	q.notifyFlush()
@@ -273,6 +276,18 @@ func (q *publishQueue) tryItem(ctx context.Context, item *publishItem) {
 	item.FailedRelays = stillFailed
 	item.Attempts++
 	item.NextRetry = time.Now().Add(calcBackoff(item.Attempts))
+
+	// Once delivered, remove from persistent storage but keep in memory
+	// for best-effort retries to remaining relays.
+	if item.Delivered && item.dbID != 0 {
+		if err := q.deleteItemLocked(ctx, item.dbID); err != nil {
+			slog.Warn("nostr: failed to remove delivered item from db, will retry",
+				"event_id", item.Event.ID.Hex(), "error", err)
+		} else {
+			item.dbID = 0
+		}
+	}
+
 	q.mu.Unlock()
 }
 
@@ -295,9 +310,22 @@ func (q *publishQueue) publishToRelay(ctx context.Context, relayURL string, evt 
 
 // cleanupLocked removes items that have no remaining failed relays.
 // Must be called with q.mu held.
-func (q *publishQueue) cleanupLocked() {
+func (q *publishQueue) cleanupLocked(ctx context.Context) {
 	q.items = slices.DeleteFunc(q.items, func(item *publishItem) bool {
-		return len(item.FailedRelays) == 0
+		if len(item.FailedRelays) == 0 {
+			if item.dbID != 0 {
+				if err := q.deleteItemLocked(ctx, item.dbID); err != nil {
+					slog.Warn("nostr: failed to remove completed item from db",
+						"event_id", item.Event.ID.Hex(), "error", err)
+
+					return false // keep in memory so we retry the delete
+				}
+			}
+
+			return true
+		}
+
+		return false
 	})
 }
 
@@ -338,67 +366,75 @@ func (q *publishQueue) run(ctx context.Context) {
 
 // --- persistence ---
 
-func (q *publishQueue) load() error {
-	if q.dataDir == "" {
-		return nil
-	}
-
-	data, err := os.ReadFile(filepath.Join(q.dataDir, publishQueueFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-
+func (q *publishQueue) load(ctx context.Context) error {
+	rows, err := q.db.queries.ListPublishQueue(ctx)
 	if err != nil {
 		return fmt.Errorf("reading publish queue: %w", err)
 	}
 
-	var items []*publishItem
-	if err := json.Unmarshal(data, &items); err != nil {
-		return fmt.Errorf("parsing publish queue: %w", err)
-	}
+	for _, row := range rows {
+		var evt gonostr.Event
+		if err := evt.UnmarshalJSON([]byte(row.EventJson)); err != nil {
+			slog.Warn("nostr: skipping corrupt publish queue event", "id", row.ID, "error", err)
 
-	// Only load items that are not yet delivered (need persistent retry).
-	for _, item := range items {
-		if !item.Delivered && len(item.FailedRelays) > 0 {
-			q.items = append(q.items, item)
+			continue
 		}
+
+		relays := strings.Split(row.Relays, "\n")
+		relays = slices.DeleteFunc(relays, func(s string) bool {
+			return strings.TrimSpace(s) == ""
+		})
+		if len(relays) == 0 {
+			continue
+		}
+
+		q.items = append(q.items, &publishItem{
+			dbID:         row.ID,
+			Event:        evt,
+			Relays:       relays,
+			FailedRelays: relays,
+			CreatedAt:    time.Unix(row.CreatedAt, 0),
+		})
 	}
 
 	if len(q.items) > 0 {
-		slog.Info("nostr: loaded publish queue from disk", "items", len(q.items))
+		slog.Info("nostr: loaded publish queue from db", "items", len(q.items))
 	}
 
 	return nil
 }
 
-// saveLocked persists only undelivered items to disk. Items that have been
-// delivered to at least one relay are kept in memory only.
+// insertItemLocked persists a new item to the database.
 // Must be called with q.mu held.
-func (q *publishQueue) saveLocked() {
-	if q.dataDir == "" {
-		return
-	}
-
-	// Only persist items where no relay has accepted yet.
-	var persistent []*publishItem
-
-	for _, item := range q.items {
-		if !item.Delivered {
-			persistent = append(persistent, item)
-		}
-	}
-
-	data, err := json.Marshal(persistent)
+func (q *publishQueue) insertItemLocked(ctx context.Context, item *publishItem) error {
+	eventJSON, err := item.Event.MarshalJSON()
 	if err != nil {
-		slog.Warn("nostr: failed to marshal publish queue", "error", err)
-
-		return
+		return fmt.Errorf("marshalling event: %w", err)
 	}
 
-	destPath := filepath.Join(q.dataDir, publishQueueFile)
-	if err := atomicfile.Write(destPath, data); err != nil {
-		slog.Warn("nostr: failed to save publish queue", "error", err)
+	id, err := q.db.queries.InsertPublishItem(ctx, InsertPublishItemParams{
+		EventJson: string(eventJSON),
+		Relays:    strings.Join(item.Relays, "\n"),
+		CreatedAt: item.CreatedAt.Unix(),
+	})
+	if err != nil {
+		return fmt.Errorf("inserting publish queue item: %w", err)
 	}
+
+	item.dbID = id
+
+	return nil
+}
+
+// deleteItemLocked removes a single item from the database.
+// Returns an error if the deletion fails so callers can retain
+// the in-memory state for retry.
+func (q *publishQueue) deleteItemLocked(ctx context.Context, dbID int64) error {
+	if err := q.db.queries.DeletePublishItem(ctx, dbID); err != nil {
+		return fmt.Errorf("deleting publish queue item %d: %w", dbID, err)
+	}
+
+	return nil
 }
 
 // calcBackoff returns the backoff duration for the given attempt number.
