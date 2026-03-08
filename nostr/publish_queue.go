@@ -381,6 +381,9 @@ func (q *publishQueue) load(ctx context.Context) error {
 		}
 
 		relays := strings.Split(row.Relays, "\n")
+		relays = slices.DeleteFunc(relays, func(s string) bool {
+			return strings.TrimSpace(s) == ""
+		})
 		if len(relays) == 0 {
 			continue
 		}
