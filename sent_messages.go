@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -132,6 +133,14 @@ func (s *sentMessageStore) Get(ctx context.Context, conversationID, messageID st
 		MessageID:      messageID,
 	})
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, context.Canceled) {
+			slog.Error("unexpected error reading sent message",
+				"conversation", conversationID,
+				"message", messageID,
+				"error", err,
+			)
+		}
+
 		return ""
 	}
 

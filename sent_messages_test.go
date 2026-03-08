@@ -116,6 +116,45 @@ func TestSentMessageStore_DuplicatePutNoCorruption(t *testing.T) {
 	}
 }
 
+func TestSentMessageStore_GetCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t)
+
+	// Insert a message so a cache-miss is not the reason for "".
+	bg := context.Background()
+	s.Put(bg, "room1", "msg1", "hello")
+
+	// Cancel the context before reading — should return "" without
+	// logging a scary error (context.Canceled is expected).
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+
+	if got := s.Get(ctx, "room1", "msg1"); got != "" {
+		t.Errorf("Get with cancelled ctx = %q, want empty", got)
+	}
+}
+
+func TestSentMessageStore_GetAfterClose(t *testing.T) {
+	t.Parallel()
+
+	s, err := newSentMessageStore(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	s.Put(ctx, "room1", "msg1", "hello")
+
+	// Close the DB to provoke a real (non-ErrNoRows) error on the next Get.
+	s.Close()
+
+	// Should return "" and log the unexpected error rather than panicking.
+	if got := s.Get(ctx, "room1", "msg1"); got != "" {
+		t.Errorf("Get after close = %q, want empty", got)
+	}
+}
+
 func TestSentMessageStore_Persistence(t *testing.T) {
 	t.Parallel()
 
