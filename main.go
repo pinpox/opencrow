@@ -14,6 +14,17 @@ import (
 	nostrbackend "github.com/pinpox/opencrow/nostr"
 )
 
+// ensureSessionDir creates the session directory (and parents) if it doesn't
+// exist. Both backends and the app store SQLite databases here, so the
+// directory must exist before any of them are initialized.
+func ensureSessionDir(path string) error {
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		return fmt.Errorf("creating session directory %s: %w", path, err)
+	}
+
+	return nil
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: parseLogLevel(os.Getenv("OPENCROW_LOG_LEVEL")),
@@ -31,6 +42,12 @@ func run() int {
 	}
 
 	slog.Info("config loaded", "backend", cfg.BackendType)
+
+	if err := ensureSessionDir(cfg.Pi.SessionDir); err != nil {
+		slog.Error("failed to create session directory", "error", err)
+
+		return 1
+	}
 
 	pool := NewPiPool(cfg.Pi)
 
