@@ -57,17 +57,23 @@ func TestInbox_PriorityOrder(t *testing.T) {
 	must(t, inbox.Enqueue(ctx, PriorityTrigger, sourceTrigger, "event data", ""))
 	must(t, inbox.Enqueue(ctx, PriorityUser, sourceUser, "urgent msg", ""))
 
-	item1, _ := inbox.Dequeue(ctx)
+	item1, err := inbox.Dequeue(ctx)
+	must(t, err)
+
 	if item1.Source != sourceUser {
 		t.Errorf("first dequeue: Source = %q, want %q", item1.Source, sourceUser)
 	}
 
-	item2, _ := inbox.Dequeue(ctx)
+	item2, err := inbox.Dequeue(ctx)
+	must(t, err)
+
 	if item2.Source != sourceTrigger {
 		t.Errorf("second dequeue: Source = %q, want %q", item2.Source, sourceTrigger)
 	}
 
-	item3, _ := inbox.Dequeue(ctx)
+	item3, err := inbox.Dequeue(ctx)
+	must(t, err)
+
 	if item3.Source != sourceHeartbeat {
 		t.Errorf("third dequeue: Source = %q, want %q", item3.Source, sourceHeartbeat)
 	}
@@ -151,12 +157,16 @@ func TestInbox_ClearsStaleHeartbeatsOnInit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, _ := inbox.Count(ctx)
+	count, err := inbox.Count(ctx)
+	must(t, err)
+
 	if count != 1 {
 		t.Fatalf("count = %d, want 1 (heartbeat should be cleared, trigger kept)", count)
 	}
 
-	item, _ := inbox.Dequeue(ctx)
+	item, err := inbox.Dequeue(ctx)
+	must(t, err)
+
 	if item.Source != sourceTrigger {
 		t.Errorf("surviving item source = %q, want %q", item.Source, sourceTrigger)
 	}
@@ -203,12 +213,16 @@ func TestInbox_Persistence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, _ := inbox2.Count(ctx)
+	count, err := inbox2.Count(ctx)
+	must(t, err)
+
 	if count != 1 {
 		t.Fatalf("count after reopen = %d, want 1", count)
 	}
 
-	item, _ := inbox2.Dequeue(ctx)
+	item, err := inbox2.Dequeue(ctx)
+	must(t, err)
+
 	if item.Content != "survived crash" {
 		t.Errorf("Content = %q, want %q", item.Content, "survived crash")
 	}

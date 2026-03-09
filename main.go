@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -123,7 +124,11 @@ func migrateLegacyOutbox(ctx context.Context, db *sql.DB, sessionDir string) err
 	legacyPath := filepath.Join(sessionDir, legacyOutboxDBFile)
 
 	if _, err := os.Stat(legacyPath); err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		return fmt.Errorf("checking legacy db: %w", err)
 	}
 
 	slog.Info("migrating legacy sent_messages.db into opencrow.db")
