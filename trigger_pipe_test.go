@@ -107,14 +107,21 @@ func waitForInboxCount(ctx context.Context, t *testing.T, inbox *InboxStore, wan
 
 	deadline := time.Now().Add(2 * time.Second)
 
-	for time.Now().Before(deadline) {
-		count, _ := inbox.Count(ctx)
+	var lastErr error
 
-		if count >= want {
+	for time.Now().Before(deadline) {
+		count, err := inbox.Count(ctx)
+		if err != nil {
+			lastErr = err
+		} else if count >= want {
 			return
 		}
 
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	if lastErr != nil {
+		t.Fatalf("inbox count did not reach %d within timeout (last error: %v)", want, lastErr)
 	}
 
 	t.Fatalf("inbox count did not reach %d within timeout", want)
