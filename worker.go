@@ -277,7 +277,7 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) {
 	}
 
 	w.be.SetTyping(ctx, convID, true)
-	defer w.be.SetTyping(ctx, convID, false)
+	defer w.be.SetTyping(context.Background(), convID, false) //nolint:contextcheck // must clear typing even after preemption
 
 	pi, err := w.ensurePi(ctx)
 	if err != nil {
