@@ -92,7 +92,7 @@ func (s *outboxStore) Get(ctx context.Context, conversationID, messageID string)
 		MessageID:      messageID,
 	})
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, context.Canceled) {
+		if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Error("unexpected error reading outbox",
 				"conversation", conversationID,
 				"message", messageID,
