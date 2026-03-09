@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,19 +27,26 @@ type Worker struct {
 	inbox   *InboxStore
 	piCfg   PiConfig
 	pi      *PiProcess
-	roomID  string // resolved lazily from .room_id file
+	app     *App
+	be      Backend
 	lastUse time.Time
 
-	// callbacks
-	sendReply  func(ctx context.Context, conversationID string, text string, replyToID string)
-	setTyping  func(ctx context.Context, conversationID string, typing bool)
-	onToolCall func(ToolCallEvent)
+	roomID string // resolved lazily from .room_id file
 
 	// config
 	hbPrompt      string
 	triggerPrompt string
 
-	// compactResult is set before enqueueing a compact item, read by the worker.
+	// preemption state — protected by mu
+	mu              sync.Mutex
+	currentPriority int64
+	currentCancel   context.CancelFunc
+
+	// wake is signalled (non-blocking) on every Notify call so the
+	// worker can poll the DB for the highest-priority item.
+	wake chan struct{}
+
+	// compactResult is set before enqueueing a compact item, read by processCompact.
 	compactResult chan compactOutcome
 }
 
@@ -48,28 +56,49 @@ type compactOutcome struct {
 	err    error
 }
 
-// WorkerConfig holds the dependencies for creating a Worker.
-type WorkerConfig struct {
-	Inbox         *InboxStore
-	PiCfg         PiConfig
-	HbCfg         HeartbeatConfig
-	TriggerPrompt string
-	SendReply     func(ctx context.Context, conversationID string, text string, replyToID string)
-	SetTyping     func(ctx context.Context, conversationID string, typing bool)
-	OnToolCall    func(ToolCallEvent)
+// Backend is the subset of backend.Backend the worker needs.
+type Backend interface {
+	SetTyping(ctx context.Context, conversationID string, typing bool)
+	SendMessage(ctx context.Context, conversationID string, text string, replyToID string) string
 }
 
 // NewWorker creates a new worker. The pi process is started lazily on first dequeue.
-func NewWorker(cfg WorkerConfig) *Worker {
+// app and be are set after construction via SetApp/SetBackend (two-phase init).
+func NewWorker(inbox *InboxStore, piCfg PiConfig, hbCfg HeartbeatConfig, triggerPrompt string) *Worker {
 	return &Worker{
-		inbox:         cfg.Inbox,
-		piCfg:         cfg.PiCfg,
-		hbPrompt:      cfg.HbCfg.Prompt,
-		triggerPrompt: cfg.TriggerPrompt,
-		sendReply:     cfg.SendReply,
-		setTyping:     cfg.SetTyping,
-		onToolCall:    cfg.OnToolCall,
-		lastUse:       time.Now(),
+		inbox:           inbox,
+		piCfg:           piCfg,
+		hbPrompt:        hbCfg.Prompt,
+		triggerPrompt:   triggerPrompt,
+		lastUse:         time.Now(),
+		currentPriority: -1,
+		wake:            make(chan struct{}, 1),
+	}
+}
+
+// SetApp wires the app reference (phase 2 of init).
+func (w *Worker) SetApp(app *App) { w.app = app }
+
+// SetBackend wires the backend reference (phase 2 of init).
+func (w *Worker) SetBackend(be Backend) { w.be = be }
+
+// Notify wakes the worker loop. Called after enqueueing an item.
+// If the new item has strictly higher priority than the running one,
+// the running operation is preempted.
+func (w *Worker) Notify(priority int64) {
+	w.mu.Lock()
+	if w.currentCancel != nil && priority < w.currentPriority {
+		slog.Info("worker: preempting current operation",
+			"new_priority", priority,
+			"current_priority", w.currentPriority,
+		)
+		w.currentCancel()
+	}
+	w.mu.Unlock()
+
+	select {
+	case w.wake <- struct{}{}:
+	default:
 	}
 }
 
@@ -77,7 +106,6 @@ func NewWorker(cfg WorkerConfig) *Worker {
 func (w *Worker) Run(ctx context.Context) {
 	slog.Info("worker: started")
 
-	// Drain any items left from a previous crash.
 	w.drainOnce(ctx)
 
 	for {
@@ -87,18 +115,17 @@ func (w *Worker) Run(ctx context.Context) {
 			slog.Info("worker: stopped")
 
 			return
-		case <-w.inbox.Wake():
+		case <-w.wake:
 			w.drainOnce(ctx)
 		}
 	}
 }
 
 // Abort cancels the currently running operation, if any.
-// Used by the !stop command.
 func (w *Worker) Abort() bool {
-	w.inbox.mu.Lock()
-	cancel := w.inbox.currentCancel
-	w.inbox.mu.Unlock()
+	w.mu.Lock()
+	cancel := w.currentCancel
+	w.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
@@ -114,15 +141,12 @@ func (w *Worker) IsActive() bool {
 	return w.pi != nil && w.pi.IsAlive()
 }
 
-// Restart kills the current pi process. The next inbox item will start a fresh one.
-func (w *Worker) Restart() {
-	w.stopPi()
-}
+// Restart kills the current pi process. The next inbox item starts a fresh one.
+func (w *Worker) Restart() { w.stopPi() }
 
 // Compact enqueues a compact operation and waits for the result.
-// It goes through the inbox so it's properly serialized with prompts.
 func (w *Worker) Compact(ctx context.Context) (*CompactResult, error) {
-	if w.pi == nil || !w.pi.IsAlive() {
+	if !w.IsActive() {
 		return nil, errors.New("no active session")
 	}
 
@@ -135,6 +159,8 @@ func (w *Worker) Compact(ctx context.Context) (*CompactResult, error) {
 		return nil, fmt.Errorf("enqueuing compact: %w", err)
 	}
 
+	w.Notify(PriorityUser)
+
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("compact cancelled: %w", ctx.Err())
@@ -143,11 +169,8 @@ func (w *Worker) Compact(ctx context.Context) (*CompactResult, error) {
 	}
 }
 
-// SetRoomID sets the room ID for this worker. Called when the first user
-// message arrives and we know the conversation ID.
-func (w *Worker) SetRoomID(roomID string) {
-	w.roomID = roomID
-}
+// SetRoomID sets the room ID for this worker.
+func (w *Worker) SetRoomID(roomID string) { w.roomID = roomID }
 
 // SkillsSummary returns a formatted list of loaded skill paths.
 func (w *Worker) SkillsSummary() string {
@@ -166,8 +189,7 @@ func (w *Worker) SkillsSummary() string {
 	return sb.String()
 }
 
-// StartIdleReaper runs a goroutine that kills the pi process
-// if no user messages have been processed for the configured timeout.
+// StartIdleReaper kills the pi process after the configured idle timeout.
 func (w *Worker) StartIdleReaper(ctx context.Context) {
 	if w.piCfg.IdleTimeout <= 0 {
 		return
@@ -191,7 +213,6 @@ func (w *Worker) StartIdleReaper(ctx context.Context) {
 	}()
 }
 
-// drainOnce processes items from the inbox until it's empty.
 func (w *Worker) drainOnce(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -200,7 +221,7 @@ func (w *Worker) drainOnce(ctx context.Context) {
 
 		item, err := w.inbox.Dequeue(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
-			return // inbox empty
+			return
 		}
 
 		if err != nil {
@@ -221,8 +242,17 @@ func (w *Worker) processItem(ctx context.Context, item Inbox) {
 	itemCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	w.inbox.SetRunning(item.Priority, cancel)
-	defer w.inbox.ClearRunning()
+	w.mu.Lock()
+	w.currentPriority = item.Priority
+	w.currentCancel = cancel
+	w.mu.Unlock()
+
+	defer func() {
+		w.mu.Lock()
+		w.currentPriority = -1
+		w.currentCancel = nil
+		w.mu.Unlock()
+	}()
 
 	if item.Source == sourceCompact {
 		w.processCompact(itemCtx)
@@ -251,15 +281,15 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) {
 		return
 	}
 
-	w.setTyping(ctx, convID, true)
-	defer w.setTyping(ctx, convID, false)
+	w.be.SetTyping(ctx, convID, true)
+	defer w.be.SetTyping(ctx, convID, false)
 
 	pi, err := w.ensurePi(ctx)
 	if err != nil {
 		slog.Error("worker: failed to start pi", "source", item.Source, "error", err)
 
 		if item.Source == sourceUser {
-			w.sendReply(ctx, convID, fmt.Sprintf("Error starting AI backend: %v", err), "")
+			w.be.SendMessage(ctx, convID, fmt.Sprintf("Error starting AI backend: %v", err), "")
 		}
 
 		return
@@ -284,11 +314,9 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) {
 		return
 	}
 
-	w.sendReply(ctx, convID, reply, item.ReplyTo)
+	w.app.sendReplyWithFiles(ctx, convID, reply, item.ReplyTo)
 }
 
-// buildPrompt constructs the pi prompt for an inbox item.
-// Returns false if the item should be skipped (e.g. empty heartbeat).
 func (w *Worker) buildPrompt(item Inbox) (string, bool) {
 	switch item.Source {
 	case sourceUser:
@@ -322,7 +350,7 @@ func (w *Worker) handlePromptError(ctx context.Context, item Inbox, convID strin
 	w.stopPi()
 
 	if item.Source == sourceUser {
-		w.sendReply(ctx, convID, fmt.Sprintf("Error: %v", err), "")
+		w.be.SendMessage(ctx, convID, fmt.Sprintf("Error: %v", err), "")
 	}
 }
 
@@ -336,7 +364,7 @@ func (w *Worker) processCompact(ctx context.Context) {
 		return
 	}
 
-	if w.pi == nil || !w.pi.IsAlive() {
+	if !w.IsActive() {
 		ch <- compactOutcome{err: errors.New("no active session")}
 
 		return
@@ -346,7 +374,6 @@ func (w *Worker) processCompact(ctx context.Context) {
 	ch <- compactOutcome{result: result, err: err}
 }
 
-// wasPreempted returns true if the error is due to context cancellation.
 func wasPreempted(ctx context.Context, err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
 		ctx.Err() != nil
@@ -364,7 +391,12 @@ func (w *Worker) ensurePi(ctx context.Context) (*PiProcess, error) {
 		return nil, err
 	}
 
-	pi.onToolCall = w.onToolCall
+	if w.piCfg.ShowToolCalls {
+		pi.onToolCall = func(evt ToolCallEvent) { //nolint:contextcheck // fire-and-forget notification, no parent ctx
+			w.be.SendMessage(context.Background(), w.resolveRoomID(), formatToolCall(evt), "")
+		}
+	}
+
 	w.pi = pi
 
 	return pi, nil

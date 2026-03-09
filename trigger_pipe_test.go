@@ -15,8 +15,6 @@ func TestTriggerPipeReader_EnqueuesLines(t *testing.T) {
 
 	ctx := t.Context()
 
-	// Use a file-based temp DB because in-memory SQLite with connection
-	// pooling can create separate databases per connection.
 	dbPath := t.TempDir() + "/test.db"
 
 	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
@@ -37,8 +35,8 @@ func TestTriggerPipeReader_EnqueuesLines(t *testing.T) {
 
 	dir := t.TempDir()
 
-	reader := NewTriggerPipeReader(inbox, dir)
-	reader.Start(ctx)
+	worker := NewWorker(inbox, PiConfig{SessionDir: dir}, HeartbeatConfig{}, "")
+	startTriggerPipe(ctx, worker, dir)
 
 	pipePath := TriggerPipePath(dir)
 	waitForFIFO(t, pipePath)

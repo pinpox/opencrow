@@ -53,12 +53,10 @@ func TestInbox_PriorityOrder(t *testing.T) {
 	ctx := context.Background()
 	inbox := newTestInbox(ctx, t)
 
-	// Enqueue in reverse priority order.
 	must(t, inbox.Enqueue(ctx, PriorityHeartbeat, sourceHeartbeat, "", ""))
 	must(t, inbox.Enqueue(ctx, PriorityTrigger, sourceTrigger, "event data", ""))
 	must(t, inbox.Enqueue(ctx, PriorityUser, sourceUser, "urgent msg", ""))
 
-	// Should dequeue in priority order: user, trigger, heartbeat.
 	item1, _ := inbox.Dequeue(ctx)
 	if item1.Source != sourceUser {
 		t.Errorf("first dequeue: Source = %q, want %q", item1.Source, sourceUser)
@@ -75,47 +73,52 @@ func TestInbox_PriorityOrder(t *testing.T) {
 	}
 }
 
-func TestInbox_PreemptsLowerPriority(t *testing.T) {
+func TestWorker_PreemptsLowerPriority(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	inbox := newTestInbox(ctx, t)
 
-	// Simulate a heartbeat running.
+	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, HeartbeatConfig{}, "")
+
+	// Simulate a heartbeat running by setting worker state directly.
 	cancelled := make(chan struct{})
 
-	inbox.SetRunning(PriorityHeartbeat, func() {
-		close(cancelled)
-	})
+	worker.mu.Lock()
+	worker.currentPriority = PriorityHeartbeat
+	worker.currentCancel = func() { close(cancelled) }
+	worker.mu.Unlock()
 
-	// Enqueue a user message — should preempt.
-	must(t, inbox.Enqueue(ctx, PriorityUser, sourceUser, "urgent", ""))
+	// Notify with user priority — should preempt the heartbeat.
+	worker.Notify(PriorityUser)
 
 	select {
 	case <-cancelled:
-		// good — the heartbeat was cancelled
+		// good
 	case <-time.After(1 * time.Second):
 		t.Fatal("preemption did not cancel the running operation")
 	}
 }
 
-func TestInbox_NoPreemptSamePriority(t *testing.T) {
+func TestWorker_NoPreemptSamePriority(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	inbox := newTestInbox(ctx, t)
 
+	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, HeartbeatConfig{}, "")
+
 	preempted := false
 
-	inbox.SetRunning(PriorityUser, func() {
-		preempted = true
-	})
+	worker.mu.Lock()
+	worker.currentPriority = PriorityUser
+	worker.currentCancel = func() { preempted = true }
+	worker.mu.Unlock()
 
-	// Another user message should NOT preempt the currently running user message.
-	must(t, inbox.Enqueue(ctx, PriorityUser, sourceUser, "second", ""))
+	worker.Notify(PriorityUser)
 
 	if preempted {
-		t.Error("same-priority enqueue should not preempt")
+		t.Error("same-priority notify should not preempt")
 	}
 }
 
@@ -131,7 +134,6 @@ func TestInbox_ClearsStaleHeartbeatsOnInit(t *testing.T) {
 
 	defer db.Close()
 
-	// Create tables and insert a stale heartbeat.
 	if _, err := db.ExecContext(ctx, dbSchema); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +142,6 @@ func TestInbox_ClearsStaleHeartbeatsOnInit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Also insert a trigger that should survive.
 	if _, err := db.ExecContext(ctx, "INSERT INTO inbox (priority, source, content) VALUES (1, 'trigger', 'keep me')"); err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +169,6 @@ func TestInbox_Persistence(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := dir + "/test.db?_journal_mode=WAL&_busy_timeout=5000"
 
-	// First store: enqueue items.
 	db1, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +187,6 @@ func TestInbox_Persistence(t *testing.T) {
 	must(t, inbox1.Enqueue(ctx, PriorityTrigger, sourceTrigger, "survived crash", ""))
 	db1.Close()
 
-	// Second store: items should still be there.
 	db2, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)

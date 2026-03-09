@@ -98,8 +98,6 @@ func run() int {
 }
 
 // openDB opens the shared database for inbox and outbox tables.
-// On first run it creates the schema. If a legacy sent_messages.db exists
-// from before the unification, its rows are migrated and the file removed.
 func openDB(ctx context.Context, sessionDir string) (*sql.DB, error) {
 	dbPath := filepath.Join(sessionDir, opencrowDBFile)
 
@@ -115,27 +113,21 @@ func openDB(ctx context.Context, sessionDir string) (*sql.DB, error) {
 	}
 
 	if err := migrateLegacyOutbox(ctx, db, sessionDir); err != nil {
-		// Non-fatal: log and continue with an empty outbox rather than
-		// refusing to start.
 		slog.Warn("failed to migrate legacy sent_messages.db", "error", err)
 	}
 
 	return db, nil
 }
 
-// migrateLegacyOutbox copies rows from the old sent_messages.db into the
-// unified opencrow.db, then removes the legacy file. This is a one-time
-// migration for existing installations.
 func migrateLegacyOutbox(ctx context.Context, db *sql.DB, sessionDir string) error {
 	legacyPath := filepath.Join(sessionDir, legacyOutboxDBFile)
 
 	if _, err := os.Stat(legacyPath); err != nil {
-		return nil // no legacy file, nothing to do
+		return nil
 	}
 
 	slog.Info("migrating legacy sent_messages.db into opencrow.db")
 
-	// Attach the old DB, copy rows, detach.
 	if _, err := db.ExecContext(ctx, "ATTACH DATABASE ? AS legacy", legacyPath); err != nil {
 		return fmt.Errorf("attaching legacy db: %w", err)
 	}
@@ -153,7 +145,6 @@ func migrateLegacyOutbox(ctx context.Context, db *sql.DB, sessionDir string) err
 		return fmt.Errorf("removing legacy db: %w", err)
 	}
 
-	// Also clean up WAL/SHM files left by the old DB.
 	_ = os.Remove(legacyPath + "-wal")
 	_ = os.Remove(legacyPath + "-shm")
 
@@ -162,13 +153,12 @@ func migrateLegacyOutbox(ctx context.Context, db *sql.DB, sessionDir string) err
 	return nil
 }
 
-// wireServices creates the backend, app, worker, and starts background schedulers.
-// It uses a two-phase init: first create everything, then wire cross-references.
+// wireServices creates backend, app, and worker using two-phase init.
 func wireServices(ctx context.Context, cfg *Config, db *sql.DB, inbox *InboxStore) (backend.Backend, *Worker, error) { //nolint:ireturn // factory returns interface by design
-	var (
-		app    *App
-		worker *Worker
-	)
+	// Phase 1: create objects with nil cross-references.
+	worker := NewWorker(inbox, cfg.Pi, cfg.Heartbeat, defaultTriggerPrompt)
+
+	var app *App
 
 	b, err := createBackend(ctx, cfg,
 		func(ctx context.Context, msg backend.Message) { app.HandleMessage(ctx, msg) },
@@ -178,40 +168,19 @@ func wireServices(ctx context.Context, cfg *Config, db *sql.DB, inbox *InboxStor
 		return nil, nil, err
 	}
 
-	worker = NewWorker(WorkerConfig{
-		Inbox:         inbox,
-		PiCfg:         cfg.Pi,
-		HbCfg:         cfg.Heartbeat,
-		TriggerPrompt: defaultTriggerPrompt,
-		SendReply: func(ctx context.Context, conversationID, text, replyToID string) {
-			app.sendReplyWithFiles(ctx, conversationID, text, replyToID)
-		},
-		SetTyping: func(ctx context.Context, conversationID string, typing bool) {
-			b.SetTyping(ctx, conversationID, typing)
-		},
-		OnToolCall: toolCallFn(cfg.Pi.ShowToolCalls, b, func() string { return worker.resolveRoomID() }), //nolint:contextcheck // callback has no context param by design
-	})
-
+	// Phase 2: wire cross-references.
 	app = NewApp(b, worker, inbox, db)
+	worker.SetApp(app)
+	worker.SetBackend(b)
+
 	cfg.Pi.SystemPrompt = app.systemPrompt(cfg.Pi.SystemPrompt)
 
 	// Start background services.
-	NewHeartbeatScheduler(inbox, cfg.Heartbeat).Start(ctx)
-	NewTriggerPipeReader(inbox, cfg.Pi.SessionDir).Start(ctx)
-
+	startHeartbeat(ctx, worker, cfg.Heartbeat)
+	startTriggerPipe(ctx, worker, cfg.Pi.SessionDir)
 	worker.StartIdleReaper(ctx)
 
 	return b, worker, nil
-}
-
-func toolCallFn(enabled bool, b backend.Backend, resolveRoom func() string) func(ToolCallEvent) {
-	if !enabled {
-		return nil
-	}
-
-	return func(evt ToolCallEvent) {
-		b.SendMessage(context.Background(), resolveRoom(), formatToolCall(evt), "")
-	}
 }
 
 func createBackend(ctx context.Context, cfg *Config, handler backend.MessageHandler, onRoomCleanup func(string)) (backend.Backend, error) { //nolint:ireturn // factory returns interface by design

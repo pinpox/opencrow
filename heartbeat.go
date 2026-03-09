@@ -7,34 +7,20 @@ import (
 	"time"
 )
 
-// HeartbeatScheduler periodically enqueues heartbeat markers into the inbox.
+// startHeartbeat periodically enqueues heartbeat markers into the inbox.
 // The worker reads HEARTBEAT.md at dequeue time and decides whether to
-// prompt pi.
-type HeartbeatScheduler struct {
-	inbox *InboxStore
-	cfg   HeartbeatConfig
-}
-
-// NewHeartbeatScheduler creates a new heartbeat scheduler.
-func NewHeartbeatScheduler(inbox *InboxStore, cfg HeartbeatConfig) *HeartbeatScheduler {
-	return &HeartbeatScheduler{
-		inbox: inbox,
-		cfg:   cfg,
-	}
-}
-
-// Start begins the heartbeat loop. Stops when ctx is cancelled.
-func (h *HeartbeatScheduler) Start(ctx context.Context) {
-	if h.cfg.Interval <= 0 {
+// prompt pi. Blocks until ctx is cancelled.
+func startHeartbeat(ctx context.Context, w *Worker, cfg HeartbeatConfig) {
+	if cfg.Interval <= 0 {
 		slog.Info("heartbeat disabled (interval not set)")
 
 		return
 	}
 
-	slog.Info("heartbeat scheduler started", "interval", h.cfg.Interval)
+	slog.Info("heartbeat scheduler started", "interval", cfg.Interval)
 
 	go func() {
-		ticker := time.NewTicker(h.cfg.Interval)
+		ticker := time.NewTicker(cfg.Interval)
 		defer ticker.Stop()
 
 		for {
@@ -42,17 +28,14 @@ func (h *HeartbeatScheduler) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				h.enqueueHeartbeat(ctx)
+				if err := w.inbox.Enqueue(ctx, PriorityHeartbeat, sourceHeartbeat, "", ""); err != nil {
+					slog.Error("heartbeat: failed to enqueue", "error", err)
+				}
+
+				w.Notify(PriorityHeartbeat)
 			}
 		}
 	}()
-}
-
-// enqueueHeartbeat inserts a heartbeat marker into the inbox.
-func (h *HeartbeatScheduler) enqueueHeartbeat(ctx context.Context) {
-	if err := h.inbox.Enqueue(ctx, PriorityHeartbeat, "heartbeat", "", ""); err != nil {
-		slog.Error("heartbeat: failed to enqueue", "error", err)
-	}
 }
 
 func buildHeartbeatPrompt(basePrompt, content string) string {
@@ -83,7 +66,6 @@ func isEffectivelyEmpty(content string) bool {
 			continue
 		}
 
-		// Found a non-empty, non-structural line
 		return false
 	}
 
@@ -95,12 +77,10 @@ func isMarkdownHeader(line string) bool {
 }
 
 func isEmptyListItem(line string) bool {
-	// Bare bullet markers
 	if line == "-" || line == "*" || line == "+" {
 		return true
 	}
 
-	// Bullet followed by only whitespace
 	for _, prefix := range []string{"- ", "* ", "+ "} {
 		if after, ok := strings.CutPrefix(line, prefix); ok {
 			return strings.TrimSpace(after) == ""
@@ -112,7 +92,6 @@ func isEmptyListItem(line string) bool {
 
 // shouldSuppressReply returns true if the reply should not be forwarded
 // to the user — either because it contains HEARTBEAT_OK or is empty.
-// The label is used for log messages (e.g. "heartbeat", "trigger").
 func shouldSuppressReply(reply, label string) bool {
 	if strings.Contains(reply, "HEARTBEAT_OK") {
 		slog.Info(label + ": HEARTBEAT_OK, suppressing")

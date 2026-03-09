@@ -133,7 +133,6 @@ func (a *App) handleSkills(ctx context.Context, msg backend.Message) {
 }
 
 func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
-	// Ensure the worker knows the room ID for this conversation.
 	a.worker.SetRoomID(msg.ConversationID)
 
 	promptText := a.buildPromptText(ctx, msg)
@@ -141,7 +140,11 @@ func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
 	if err := a.inbox.Enqueue(ctx, PriorityUser, sourceUser, promptText, msg.ReplyToID); err != nil {
 		slog.Error("failed to enqueue user message", "error", err)
 		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Error: %v", err), "")
+
+		return
 	}
+
+	a.worker.Notify(PriorityUser)
 }
 
 // buildPromptText prepends reply-quote context to the message text.

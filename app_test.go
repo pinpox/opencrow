@@ -90,15 +90,13 @@ func newTestAppWithBackend(t *testing.T, mb *mockBackend) (*App, *mockBackend) {
 	db := newTestDB(ctx, t)
 	inbox := newTestInboxWithDB(ctx, t, db)
 
-	worker := NewWorker(WorkerConfig{
-		Inbox:     inbox,
-		PiCfg:     PiConfig{SessionDir: t.TempDir()},
-		HbCfg:     HeartbeatConfig{},
-		SendReply: func(_ context.Context, _ string, _ string, _ string) {},
-		SetTyping: func(_ context.Context, _ string, _ bool) {},
-	})
+	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, HeartbeatConfig{}, "")
+	worker.SetBackend(mb)
 
-	return NewApp(mb, worker, inbox, db), mb
+	app := NewApp(mb, worker, inbox, db)
+	worker.SetApp(app)
+
+	return app, mb
 }
 
 // sendCommand sends a command message from a default user to testRoom.

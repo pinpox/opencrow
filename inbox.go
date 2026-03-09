@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"sync"
 )
 
 // Priority levels for inbox items. Lower number = higher priority.
@@ -15,22 +14,11 @@ const (
 	PriorityHeartbeat = 2
 )
 
+//go:generate sqlc generate
+
 // InboxStore is a persistent priority queue backed by SQLite.
-// Items survive crashes. A signal channel notifies the worker
-// when new items are enqueued.
 type InboxStore struct {
 	queries *Queries
-	db      *sql.DB
-
-	// wake is signalled (non-blocking) on every enqueue so the worker
-	// can poll the DB for the highest-priority item.
-	wake chan struct{}
-
-	// mu protects preempt state so the enqueue path can safely cancel
-	// a running lower-priority operation.
-	mu              sync.Mutex
-	currentPriority int64 // priority of the item currently being processed
-	currentCancel   context.CancelFunc
 }
 
 // NewInboxStore wraps an existing database connection. The schema must
@@ -39,25 +27,14 @@ type InboxStore struct {
 func NewInboxStore(ctx context.Context, db *sql.DB) (*InboxStore, error) {
 	queries := New(db)
 
-	// Clear stale heartbeat markers from a previous run — the timer
-	// will re-enqueue fresh ones.
 	if err := queries.DeleteHeartbeatItems(ctx); err != nil {
 		return nil, fmt.Errorf("clearing stale heartbeat items: %w", err)
 	}
 
-	return &InboxStore{
-		queries:         queries,
-		db:              db,
-		wake:            make(chan struct{}, 1),
-		currentPriority: -1, // nothing running
-	}, nil
+	return &InboxStore{queries: queries}, nil
 }
 
-//go:generate sqlc generate
-
-// Enqueue inserts an item into the inbox and signals the worker.
-// If the worker is currently processing a lower-priority item, its
-// context is cancelled so it can pick up the new item.
+// Enqueue inserts an item into the inbox.
 func (s *InboxStore) Enqueue(ctx context.Context, priority int64, source, content, replyTo string) error {
 	if err := s.queries.EnqueueInbox(ctx, EnqueueInboxParams{
 		Priority: priority,
@@ -70,23 +47,6 @@ func (s *InboxStore) Enqueue(ctx context.Context, priority int64, source, conten
 
 	slog.Info("inbox: enqueued", "source", source, "priority", priority)
 
-	// Check if we should preempt the currently running operation.
-	s.mu.Lock()
-	if s.currentCancel != nil && priority < s.currentPriority {
-		slog.Info("inbox: preempting current operation",
-			"new_priority", priority,
-			"current_priority", s.currentPriority,
-		)
-		s.currentCancel()
-	}
-	s.mu.Unlock()
-
-	// Non-blocking signal to wake the worker.
-	select {
-	case s.wake <- struct{}{}:
-	default:
-	}
-
 	return nil
 }
 
@@ -96,34 +56,11 @@ func (s *InboxStore) Dequeue(ctx context.Context) (Inbox, error) {
 	return s.queries.DequeueInbox(ctx)
 }
 
-// Wake returns the channel that is signalled when items are enqueued.
-func (s *InboxStore) Wake() <-chan struct{} {
-	return s.wake
-}
-
-// SetRunning records what the worker is currently processing so that
-// Enqueue can preempt it if a higher-priority item arrives.
-func (s *InboxStore) SetRunning(priority int64, cancel context.CancelFunc) {
-	s.mu.Lock()
-	s.currentPriority = priority
-	s.currentCancel = cancel
-	s.mu.Unlock()
-}
-
-// ClearRunning clears the current-operation state.
-func (s *InboxStore) ClearRunning() {
-	s.mu.Lock()
-	s.currentPriority = -1
-	s.currentCancel = nil
-	s.mu.Unlock()
-}
-
-// Requeue re-inserts an item that was interrupted. Only triggers carry
-// unique data worth preserving; heartbeat markers are dropped since the
-// timer will fire again.
+// Requeue re-inserts an item that was interrupted. Heartbeat markers are
+// dropped since the timer will re-fire.
 func (s *InboxStore) Requeue(ctx context.Context, item Inbox) {
-	if item.Source == "heartbeat" {
-		return // timer will re-enqueue
+	if item.Source == sourceHeartbeat {
+		return
 	}
 
 	if err := s.queries.EnqueueInbox(ctx, EnqueueInboxParams{

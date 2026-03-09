@@ -12,25 +12,10 @@ import (
 	"syscall"
 )
 
-// TriggerPipeReader reads lines from a named pipe (FIFO) and enqueues
-// them into the inbox. It is a thin adapter — all scheduling and
-// priority logic lives in the inbox/worker.
-type TriggerPipeReader struct {
-	inbox      *InboxStore
-	sessionDir string
-}
-
-// NewTriggerPipeReader creates a new trigger pipe reader.
-func NewTriggerPipeReader(inbox *InboxStore, sessionDir string) *TriggerPipeReader {
-	return &TriggerPipeReader{
-		inbox:      inbox,
-		sessionDir: sessionDir,
-	}
-}
-
-// Start begins reading from the trigger pipe. Blocks until ctx is cancelled.
-func (t *TriggerPipeReader) Start(ctx context.Context) {
-	pipePath := TriggerPipePath(t.sessionDir)
+// startTriggerPipe reads lines from a named pipe (FIFO) and enqueues
+// them into the inbox. Runs until ctx is cancelled.
+func startTriggerPipe(ctx context.Context, w *Worker, sessionDir string) {
+	pipePath := TriggerPipePath(sessionDir)
 
 	if err := ensureFIFO(pipePath); err != nil {
 		slog.Error("trigger: failed to ensure FIFO", "path", pipePath, "error", err)
@@ -40,11 +25,10 @@ func (t *TriggerPipeReader) Start(ctx context.Context) {
 
 	slog.Info("trigger pipe reader started", "path", pipePath)
 
-	go t.readLoop(ctx, pipePath)
+	go triggerReadLoop(ctx, w, pipePath)
 }
 
-// readLoop reads lines from the named pipe and enqueues each as a trigger.
-func (t *TriggerPipeReader) readLoop(ctx context.Context, pipePath string) {
+func triggerReadLoop(ctx context.Context, w *Worker, pipePath string) {
 	// Open with O_RDWR so the fd stays open even when writers close their end.
 	f, err := os.OpenFile(pipePath, os.O_RDWR, 0)
 	if err != nil {
@@ -54,7 +38,6 @@ func (t *TriggerPipeReader) readLoop(ctx context.Context, pipePath string) {
 	}
 	defer f.Close()
 
-	// Watch for context cancellation and close the fd to unblock the scanner.
 	stop := context.AfterFunc(ctx, func() { f.Close() })
 	defer stop()
 
@@ -72,9 +55,11 @@ func (t *TriggerPipeReader) readLoop(ctx context.Context, pipePath string) {
 
 		slog.Info("trigger: received", "content", line)
 
-		if err := t.inbox.Enqueue(ctx, PriorityTrigger, "trigger", line, ""); err != nil {
+		if err := w.inbox.Enqueue(ctx, PriorityTrigger, sourceTrigger, line, ""); err != nil {
 			slog.Error("trigger: failed to enqueue", "error", err)
 		}
+
+		w.Notify(PriorityTrigger)
 	}
 
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
@@ -87,8 +72,6 @@ func TriggerPipePath(sessionDir string) string {
 	return filepath.Join(sessionDir, "trigger.pipe")
 }
 
-// ensureFIFO creates a named pipe at the given path if it doesn't exist.
-// If a non-FIFO file exists at the path, it is replaced.
 func ensureFIFO(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating FIFO parent dir: %w", err)
@@ -96,11 +79,10 @@ func ensureFIFO(path string) error {
 
 	info, err := os.Lstat(path)
 	if err == nil {
-		// File exists — check if it's already a FIFO
 		if info.Mode()&os.ModeNamedPipe != 0 {
 			return nil
 		}
-		// Not a FIFO, remove it
+
 		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("removing non-FIFO at %s: %w", path, err)
 		}
