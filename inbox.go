@@ -22,13 +22,15 @@ type InboxStore struct {
 }
 
 // NewInboxStore wraps an existing database connection. The schema must
-// already be applied (openDB handles this). Clears stale heartbeat
-// markers left over from a previous crash.
+// already be applied (openDB handles this). Clears stale heartbeat and
+// compact items left over from a previous crash.
 func NewInboxStore(ctx context.Context, db *sql.DB) (*InboxStore, error) {
 	queries := New(db)
 
-	if err := queries.DeleteHeartbeatItems(ctx); err != nil {
-		return nil, fmt.Errorf("clearing stale heartbeat items: %w", err)
+	// Heartbeat and compact items have in-memory state that doesn't
+	// survive a restart, so purge any left over from a previous run.
+	if err := queries.DeleteStaleItems(ctx); err != nil {
+		return nil, fmt.Errorf("clearing stale inbox items: %w", err)
 	}
 
 	return &InboxStore{queries: queries}, nil

@@ -32,15 +32,6 @@ func (q *Queries) CountOutbox(ctx context.Context, conversationID string) (int64
 	return count, err
 }
 
-const deleteHeartbeatItems = `-- name: DeleteHeartbeatItems :exec
-DELETE FROM inbox WHERE source = 'heartbeat'
-`
-
-func (q *Queries) DeleteHeartbeatItems(ctx context.Context) error {
-	_, err := q.db.ExecContext(ctx, deleteHeartbeatItems)
-	return err
-}
-
 const deleteInboxItem = `-- name: DeleteInboxItem :exec
 DELETE FROM inbox WHERE id = ?
 `
@@ -67,6 +58,15 @@ type DeleteOldestOutboxParams struct {
 
 func (q *Queries) DeleteOldestOutbox(ctx context.Context, arg DeleteOldestOutboxParams) error {
 	_, err := q.db.ExecContext(ctx, deleteOldestOutbox, arg.ConversationID, arg.Limit)
+	return err
+}
+
+const deleteStaleItems = `-- name: DeleteStaleItems :exec
+DELETE FROM inbox WHERE source IN ('heartbeat', 'compact')
+`
+
+func (q *Queries) DeleteStaleItems(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteStaleItems)
 	return err
 }
 
