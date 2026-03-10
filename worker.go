@@ -223,7 +223,8 @@ func (w *Worker) StartIdleReaper(ctx context.Context) {
 				return
 			case <-ticker.C:
 				w.mu.Lock()
-				idle := w.pi != nil && w.pi.IsAlive() && time.Since(w.lastUse) > w.piCfg.IdleTimeout
+				processing := w.currentCancel != nil
+				idle := !processing && w.pi != nil && w.pi.IsAlive() && time.Since(w.lastUse) > w.piCfg.IdleTimeout
 				w.mu.Unlock()
 
 				if idle {
@@ -319,14 +320,12 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) {
 		return
 	}
 
-	if item.Source == sourceUser {
-		w.mu.Lock()
-		w.lastUse = time.Now()
-		w.mu.Unlock()
+	w.mu.Lock()
+	w.lastUse = time.Now()
+	w.mu.Unlock()
 
-		if reply == "" {
-			reply = w.retryEmptyResponse(ctx, pi)
-		}
+	if item.Source == sourceUser && reply == "" {
+		reply = w.retryEmptyResponse(ctx, pi)
 	}
 
 	if shouldSuppressReply(reply, item.Source) {
