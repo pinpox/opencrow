@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,31 +25,28 @@ const (
 // Worker owns the single pi process and drains the inbox in priority order.
 // There is exactly one worker per opencrow instance.
 type Worker struct {
-	inbox   *InboxStore
-	piCfg   PiConfig
-	pi      *PiProcess
-	app     *App
-	be      Backend
-	lastUse time.Time
+	inbox *InboxStore
+	piCfg PiConfig
+	app   *App
+	be    Backend
 
-	roomID string // resolved lazily from .room_id file
+	roomID atomic.Value // string, resolved lazily from .room_id file
 
 	// config
 	hbPrompt      string
 	triggerPrompt string
 
-	// mu protects fields accessed from multiple goroutines:
-	// pi, roomID, lastUse, compactResult, currentPriority, currentCancel.
+	// mu protects pi, lastUse, compactResult, currentPriority, currentCancel.
 	mu              sync.Mutex
+	pi              *PiProcess
+	lastUse         time.Time
 	currentPriority int64
 	currentCancel   context.CancelFunc
+	compactResult   chan compactOutcome
 
 	// wake is signalled (non-blocking) on every Notify call so the
 	// worker can poll the DB for the highest-priority item.
 	wake chan struct{}
-
-	// compactResult is set before enqueueing a compact item, read by processCompact.
-	compactResult chan compactOutcome
 }
 
 // compactOutcome carries the result of a compact operation back to the caller.
@@ -185,9 +183,7 @@ func (w *Worker) Compact(ctx context.Context) (*CompactResult, error) {
 
 // SetRoomID sets the room ID for this worker.
 func (w *Worker) SetRoomID(roomID string) {
-	w.mu.Lock()
-	w.roomID = roomID
-	w.mu.Unlock()
+	w.roomID.Store(roomID)
 }
 
 // SkillsSummary returns a formatted list of loaded skill paths.
@@ -482,14 +478,9 @@ func (w *Worker) stopPi() {
 }
 
 func (w *Worker) resolveRoomID() string {
-	w.mu.Lock()
-	if w.roomID != "" {
-		id := w.roomID
-		w.mu.Unlock()
-
+	if id, ok := w.roomID.Load().(string); ok && id != "" {
 		return id
 	}
-	w.mu.Unlock()
 
 	path := filepath.Join(w.piCfg.SessionDir, ".room_id")
 
@@ -499,10 +490,7 @@ func (w *Worker) resolveRoomID() string {
 	}
 
 	id := strings.TrimSpace(string(data))
-
-	w.mu.Lock()
-	w.roomID = id
-	w.mu.Unlock()
+	w.roomID.Store(id)
 
 	return id
 }
