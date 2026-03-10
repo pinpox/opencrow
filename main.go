@@ -2,28 +2,31 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	_ "embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/pinpox/opencrow/backend"
 	"github.com/pinpox/opencrow/matrix"
 	nostrbackend "github.com/pinpox/opencrow/nostr"
+	// Register the pure-Go SQLite driver.
+	_ "modernc.org/sqlite"
 )
 
-// ensureSessionDir creates the session directory (and parents) if it doesn't
-// exist. Both backends and the app store SQLite databases here, so the
-// directory must exist before any of them are initialized.
-func ensureSessionDir(path string) error {
-	if err := os.MkdirAll(path, 0o750); err != nil {
-		return fmt.Errorf("creating session directory %s: %w", path, err)
-	}
+const (
+	opencrowDBFile     = "opencrow.db"
+	legacyOutboxDBFile = "sent_messages.db"
+)
 
-	return nil
-}
+//go:embed sqlc/schema.sql
+var dbSchema string
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -43,68 +46,152 @@ func run() int {
 
 	slog.Info("config loaded", "backend", cfg.BackendType)
 
-	if err := ensureSessionDir(cfg.Pi.SessionDir); err != nil {
+	if err := os.MkdirAll(cfg.Pi.SessionDir, 0o750); err != nil {
 		slog.Error("failed to create session directory", "error", err)
 
 		return 1
 	}
 
-	pool := NewPiPool(cfg.Pi)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool.StartIdleReaper(ctx)
+	db, err := openDB(ctx, cfg.Pi.SessionDir)
+	if err != nil {
+		slog.Error("failed to open database", "error", err)
 
-	b, app, err := wireServices(ctx, cfg, pool)
+		return 1
+	}
+	defer db.Close()
+
+	inbox, err := NewInboxStore(ctx, db)
+	if err != nil {
+		slog.Error("failed to initialize inbox", "error", err)
+
+		return 1
+	}
+
+	b, worker, err := wireServices(ctx, cfg, db, inbox)
 	if err != nil {
 		slog.Error("failed to initialize services", "error", err)
 
 		return 1
 	}
 
-	setupShutdown(b, pool, cancel)
+	setupShutdown(b, cancel)
+
+	go worker.Run(ctx)
 
 	slog.Info("opencrow starting")
 
-	return runBackend(ctx, b, app)
-}
+	if err := b.Run(ctx); err != nil {
+		if ctx.Err() == nil {
+			slog.Error("backend exited with error", "error", err)
 
-// wireServices creates the backend, app, heartbeat scheduler, and trigger pipe manager.
-func wireServices(ctx context.Context, cfg *Config, pool *PiPool) (backend.Backend, *App, error) { //nolint:ireturn // factory returns interface by design
-	var app *App
-
-	handler := func(ctx context.Context, msg backend.Message) {
-		if app == nil {
-			slog.Error("received message before app was initialized")
-
-			return
+			return 1
 		}
 
-		app.HandleMessage(ctx, msg)
+		slog.Info("shutdown complete")
 	}
 
-	b, err := createBackend(ctx, cfg, pool, handler)
-	if err != nil {
-		return nil, nil, err
-	}
+	_ = b.Close()
 
-	app, err = NewApp(ctx, b, pool, nil, cfg.Pi.SessionDir)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	cfg.Pi.SystemPrompt = app.systemPrompt(cfg.Pi.SystemPrompt)
-
-	startSchedulers(ctx, cfg, pool, b, app)
-
-	return b, app, nil
+	return 0
 }
 
-func createBackend(ctx context.Context, cfg *Config, pool *PiPool, handler backend.MessageHandler) (backend.Backend, error) { //nolint:ireturn // factory returns interface by design
+// openDB opens the shared database for inbox and outbox tables.
+func openDB(ctx context.Context, sessionDir string) (*sql.DB, error) {
+	dbPath := filepath.Join(sessionDir, opencrowDBFile)
+
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		return nil, fmt.Errorf("opening database: %w", err)
+	}
+
+	if _, err := db.ExecContext(ctx, dbSchema); err != nil {
+		db.Close()
+
+		return nil, fmt.Errorf("migrating schema: %w", err)
+	}
+
+	if err := migrateLegacyOutbox(ctx, db, sessionDir); err != nil {
+		slog.Warn("failed to migrate legacy sent_messages.db", "error", err)
+	}
+
+	return db, nil
+}
+
+func migrateLegacyOutbox(ctx context.Context, db *sql.DB, sessionDir string) error {
+	legacyPath := filepath.Join(sessionDir, legacyOutboxDBFile)
+
+	if _, err := os.Stat(legacyPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		return fmt.Errorf("checking legacy db: %w", err)
+	}
+
+	slog.Info("migrating legacy sent_messages.db into opencrow.db")
+
+	if _, err := db.ExecContext(ctx, "ATTACH DATABASE ? AS legacy", legacyPath); err != nil {
+		return fmt.Errorf("attaching legacy db: %w", err)
+	}
+
+	defer db.ExecContext(ctx, "DETACH DATABASE legacy") //nolint:errcheck // best-effort detach
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO sent_messages (conversation_id, message_id, text)
+		SELECT conversation_id, message_id, text FROM legacy.sent_messages
+	`); err != nil {
+		return fmt.Errorf("copying legacy rows: %w", err)
+	}
+
+	if err := os.Remove(legacyPath); err != nil {
+		return fmt.Errorf("removing legacy db: %w", err)
+	}
+
+	_ = os.Remove(legacyPath + "-wal")
+	_ = os.Remove(legacyPath + "-shm")
+
+	slog.Info("legacy sent_messages.db migrated and removed")
+
+	return nil
+}
+
+// wireServices creates backend, app, and worker using two-phase init.
+func wireServices(ctx context.Context, cfg *Config, db *sql.DB, inbox *InboxStore) (backend.Backend, *Worker, error) { //nolint:ireturn // factory returns interface by design
+	// Phase 1: create objects with nil cross-references.
+	worker := NewWorker(inbox, cfg.Pi, cfg.Heartbeat, defaultTriggerPrompt)
+
+	var app *App
+
+	b, err := createBackend(ctx, cfg,
+		func(ctx context.Context, msg backend.Message) { app.HandleMessage(ctx, msg) },
+		func(_ string) { worker.Restart() },
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Phase 2: wire cross-references.
+	app = NewApp(b, worker, inbox, db)
+	worker.SetApp(app)
+	worker.SetBackend(b)
+
+	worker.piCfg.SystemPrompt = app.systemPrompt(worker.piCfg.SystemPrompt)
+
+	// Start background services.
+	startHeartbeat(ctx, worker, cfg.Heartbeat)
+	startTriggerPipe(ctx, worker, cfg.Pi.SessionDir)
+	worker.StartIdleReaper(ctx)
+
+	return b, worker, nil
+}
+
+func createBackend(ctx context.Context, cfg *Config, handler backend.MessageHandler, onRoomCleanup func(string)) (backend.Backend, error) { //nolint:ireturn // factory returns interface by design
 	switch cfg.BackendType {
 	case backendMatrix:
-		return createMatrixBackend(cfg, pool, handler)
+		return createMatrixBackend(cfg, handler, onRoomCleanup)
 	case backendNostr:
 		return createNostrBackend(ctx, cfg, handler)
 	default:
@@ -112,25 +199,7 @@ func createBackend(ctx context.Context, cfg *Config, pool *PiPool, handler backe
 	}
 }
 
-func startSchedulers(ctx context.Context, cfg *Config, pool *PiPool, b backend.Backend, app *App) {
-	hb := NewHeartbeatScheduler(pool, cfg.Pi, cfg.Heartbeat, func(ctx context.Context, roomID string, text string) {
-		app.sendReplyWithFiles(ctx, roomID, text, "")
-	})
-	hb.Start(ctx)
-
-	triggerMgr := NewTriggerPipeManager(pool, cfg.Pi, defaultTriggerPrompt,
-		func(ctx context.Context, roomID string, text string) {
-			app.sendReplyWithFiles(ctx, roomID, text, "")
-		},
-		func(ctx context.Context, roomID string, typing bool) {
-			b.SetTyping(ctx, roomID, typing)
-		},
-	)
-	triggerMgr.Start(ctx)
-	app.triggerMgr = triggerMgr
-}
-
-func setupShutdown(b backend.Backend, pool *PiPool, cancel context.CancelFunc) {
+func setupShutdown(b backend.Backend, cancel context.CancelFunc) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -138,32 +207,11 @@ func setupShutdown(b backend.Backend, pool *PiPool, cancel context.CancelFunc) {
 		sig := <-sigCh
 		slog.Info("received signal, shutting down", "signal", sig)
 		b.Stop()
-		pool.StopAll()
 		cancel()
 	}()
 }
 
-func runBackend(ctx context.Context, b backend.Backend, app *App) int {
-	defer app.Close()
-
-	if err := b.Run(ctx); err != nil {
-		if ctx.Err() != nil {
-			slog.Info("shutdown complete")
-		} else {
-			slog.Error("backend exited with error", "error", err)
-
-			return 1
-		}
-	}
-
-	if err := b.Close(); err != nil {
-		slog.Error("failed to close backend", "error", err)
-	}
-
-	return 0
-}
-
-func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandler) (*matrix.Backend, error) {
+func createMatrixBackend(cfg *Config, handler backend.MessageHandler, onRoomCleanup func(string)) (*matrix.Backend, error) {
 	matrixCfg := matrix.Config{
 		Homeserver:     cfg.Matrix.Homeserver,
 		UserID:         cfg.Matrix.UserID,
@@ -180,9 +228,7 @@ func createMatrixBackend(cfg *Config, pool *PiPool, handler backend.MessageHandl
 		return nil, fmt.Errorf("creating matrix backend: %w", err)
 	}
 
-	b.SetRoomCleanupCallback(func(roomID string) {
-		pool.Remove(roomID)
-	})
+	b.SetRoomCleanupCallback(onRoomCleanup)
 
 	return b, nil
 }

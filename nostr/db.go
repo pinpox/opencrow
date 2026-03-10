@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -26,7 +27,7 @@ type DB struct {
 // OpenDB opens (or creates) the nostr SQLite database in dataDir.
 func OpenDB(ctx context.Context, dataDir string) (*DB, error) {
 	if dataDir == "" {
-		return nil, fmt.Errorf("dataDir must not be empty")
+		return nil, errors.New("dataDir must not be empty")
 	}
 
 	dbPath := filepath.Join(dataDir, nostrDBFile)

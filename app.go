@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -36,42 +37,31 @@ func extractSendFiles(text string) (string, []string) {
 	return cleaned, paths
 }
 
-// App orchestrates the business logic: command handling, pi prompting,
+// App orchestrates the business logic: command handling, inbox enqueueing,
 // and file extraction. It delegates transport concerns to a Backend.
 type App struct {
-	backend    backend.Backend
-	pool       *PiPool
-	triggerMgr *TriggerPipeManager
-	sent       *sentMessageStore
+	backend backend.Backend
+	worker  *Worker
+	inbox   *InboxStore
+	outbox  *outboxStore
 }
 
-// NewApp creates a new App. dataDir is used for persistent state (e.g.,
-// sent message store). The triggerMgr may be nil if not used.
-func NewApp(ctx context.Context, b backend.Backend, pool *PiPool, triggerMgr *TriggerPipeManager, dataDir string) (*App, error) {
-	sent, err := newSentMessageStore(ctx, dataDir)
-	if err != nil {
-		return nil, fmt.Errorf("initializing sent message store: %w", err)
-	}
-
+// NewApp creates a new App. The db connection is shared with the inbox
+// and owned by the caller.
+func NewApp(b backend.Backend, worker *Worker, inbox *InboxStore, db *sql.DB) *App {
 	return &App{
-		backend:    b,
-		pool:       pool,
-		triggerMgr: triggerMgr,
-		sent:       sent,
-	}, nil
-}
-
-// Close releases resources held by the App.
-func (a *App) Close() error {
-	return a.sent.Close()
+		backend: b,
+		worker:  worker,
+		inbox:   inbox,
+		outbox:  newOutboxStore(db),
+	}
 }
 
 // HandleMessage is the backend.MessageHandler callback. It dispatches
-// commands and normal messages.
+// commands and enqueues normal messages into the inbox.
 func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	// Record the incoming message so future reply-to references can quote it.
-	// Without this, replies to user messages would show "content unavailable".
-	a.sent.Put(ctx, msg.ConversationID, msg.MessageID, msg.Text)
+	a.outbox.Put(ctx, msg.ConversationID, msg.MessageID, msg.Text)
 
 	switch msg.Text {
 	case "!help":
@@ -101,19 +91,18 @@ func (a *App) handleHelp(ctx context.Context, msg backend.Message) {
 
 func (a *App) handleRestart(ctx context.Context, msg backend.Message) {
 	a.backend.ResetConversation(ctx, msg.ConversationID)
-	a.pool.Remove(msg.ConversationID)
+	a.worker.Restart()
 	a.backend.SendMessage(ctx, msg.ConversationID, "Session restarted. Next message will use a fresh process.", "")
 }
 
 func (a *App) handleStop(ctx context.Context, msg backend.Message) {
-	pi := a.pool.GetExisting(msg.ConversationID)
-	if pi == nil {
+	if !a.worker.IsActive() {
 		a.backend.SendMessage(ctx, msg.ConversationID, "No active session.", "")
 
 		return
 	}
 
-	if pi.Abort() {
+	if a.worker.Abort() {
 		a.backend.SendMessage(ctx, msg.ConversationID, "Aborted current operation.", "")
 	} else {
 		a.backend.SendMessage(ctx, msg.ConversationID, "Nothing running to stop.", "")
@@ -121,14 +110,13 @@ func (a *App) handleStop(ctx context.Context, msg backend.Message) {
 }
 
 func (a *App) handleCompact(ctx context.Context, msg backend.Message) {
-	pi := a.pool.GetExisting(msg.ConversationID)
-	if pi == nil {
+	if !a.worker.IsActive() {
 		a.backend.SendMessage(ctx, msg.ConversationID, "No active session to compact.", "")
 
 		return
 	}
 
-	result, err := pi.Compact(ctx)
+	result, err := a.worker.Compact(ctx)
 	if err != nil {
 		slog.Error("compact failed", "conversation", msg.ConversationID, "error", err)
 		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Compaction failed: %v", err), "")
@@ -141,44 +129,22 @@ func (a *App) handleCompact(ctx context.Context, msg backend.Message) {
 }
 
 func (a *App) handleSkills(ctx context.Context, msg backend.Message) {
-	a.backend.SendMessage(ctx, msg.ConversationID, a.pool.SkillsSummary(), "")
+	a.backend.SendMessage(ctx, msg.ConversationID, a.worker.SkillsSummary(), "")
 }
 
 func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {
-	a.backend.SetTyping(ctx, msg.ConversationID, true)
-	defer a.backend.SetTyping(ctx, msg.ConversationID, false)
+	a.worker.SetRoomID(msg.ConversationID)
 
-	pi, err := a.pool.Get(ctx, msg.ConversationID)
-	if err != nil {
-		slog.Error("failed to get pi process", "conversation", msg.ConversationID, "error", err)
-		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Error starting AI backend: %v", err), "")
+	promptText := a.buildPromptText(ctx, msg)
+
+	if err := a.inbox.Enqueue(ctx, PriorityUser, sourceUser, promptText, msg.ReplyToID); err != nil {
+		slog.Error("failed to enqueue user message", "error", err)
+		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Error: %v", err), "")
 
 		return
 	}
 
-	if a.triggerMgr != nil {
-		a.triggerMgr.StartRoom(ctx, msg.ConversationID)
-	}
-
-	toolCallFn := a.makeToolCallFn(ctx, msg.ConversationID)
-	promptText := a.buildPromptText(ctx, msg)
-
-	reply := a.promptWithRetry(ctx, pi, msg.ConversationID, promptText, toolCallFn)
-
-	a.sendReplyWithFiles(ctx, msg.ConversationID, reply, msg.ReplyToID)
-}
-
-// makeToolCallFn returns a callback that relays tool-call events to the chat,
-// or nil when tool-call display is disabled.
-func (a *App) makeToolCallFn(ctx context.Context, conversationID string) func(ToolCallEvent) {
-	if !a.pool.cfg.ShowToolCalls {
-		return nil
-	}
-
-	return func(evt ToolCallEvent) {
-		text := formatToolCall(evt)
-		a.backend.SendMessage(ctx, conversationID, text, "")
-	}
+	a.worker.Notify(PriorityUser)
 }
 
 // buildPromptText prepends reply-quote context to the message text.
@@ -186,7 +152,7 @@ func (a *App) buildPromptText(ctx context.Context, msg backend.Message) string {
 	promptText := msg.Text
 
 	if msg.ReplyToID != "" {
-		if quoted := a.sent.Get(ctx, msg.ConversationID, msg.ReplyToID); quoted != "" {
+		if quoted := a.outbox.Get(ctx, msg.ConversationID, msg.ReplyToID); quoted != "" {
 			promptText = fmt.Sprintf("[user replied to message: %q]\n%s", quoted, promptText)
 		} else {
 			promptText = "[user replied to a message whose content is unavailable — ask for clarification if their message is unclear]\n" + promptText
@@ -194,37 +160,6 @@ func (a *App) buildPromptText(ctx context.Context, msg backend.Message) string {
 	}
 
 	return promptText
-}
-
-// promptWithRetry sends the prompt to pi and re-prompts once when the
-// response is empty. On error the pi process is removed from the pool.
-func (a *App) promptWithRetry(ctx context.Context, pi *PiProcess, conversationID, promptText string, toolCallFn func(ToolCallEvent)) string {
-	reply, err := pi.Prompt(ctx, promptText, toolCallFn)
-	if err != nil {
-		slog.Error("pi prompt failed", "conversation", conversationID, "error", err)
-		a.pool.Remove(conversationID)
-
-		return fmt.Sprintf("Error: %v", err)
-	}
-
-	if reply != "" {
-		return reply
-	}
-
-	slog.Warn("pi returned empty response, re-prompting for summary", "conversation", conversationID)
-
-	reply, err = pi.Prompt(ctx, "You just completed a task but your response contained no text for the user. Please briefly summarize what you did or respond to the user's message.")
-	if err != nil {
-		slog.Error("re-prompt after empty response failed", "conversation", conversationID, "error", err)
-
-		return "(I completed some actions but failed to generate a summary.)"
-	}
-
-	if reply == "" {
-		return "(empty response)"
-	}
-
-	return reply
 }
 
 // sendReplyWithFiles extracts <sendfile> tags, uploads each file, and
@@ -250,7 +185,7 @@ func (a *App) sendReplyWithFiles(ctx context.Context, conversationID, reply, rep
 
 	if cleanReply != "" {
 		sentID := a.backend.SendMessage(ctx, conversationID, cleanReply, replyToID)
-		a.sent.Put(ctx, conversationID, sentID, cleanReply)
+		a.outbox.Put(ctx, conversationID, sentID, cleanReply)
 	}
 }
 

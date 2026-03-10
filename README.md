@@ -19,19 +19,11 @@ OpenCrow supports multiple messaging backends:
 
 ```mermaid
 graph LR
-    Transport[Matrix / Nostr] -->|message| App["App (Go)"]
-    App -->|RPC| Pi["pi process"]
-    Pi -->|response| App
-    App -->|reply| Transport
-
-    Skills["SKILL.md files"] -->|"--skill"| Pi
-    HB["HEARTBEAT.md"] -->|read| Sched[HeartbeatScheduler]
-    Timer["Timer (every N min)"] --> Sched
-    Ext["External process"] -->|"trigger.pipe"| TrigMgr[TriggerPipeManager]
-    TrigMgr -->|PromptNoTouch| Pi
-    Sched -->|PromptNoTouch| Pi
-    Pi -->|"HEARTBEAT_OK"| Suppress(suppress)
-    Pi -->|real content| App
+    Transport[Matrix / Nostr] -->|message| Inbox[(Inbox)]
+    Heartbeat -->|timer| Inbox
+    Trigger["trigger.pipe"] -->|external| Inbox
+    Inbox -->|dequeue| Worker -->|RPC| Pi["pi process"]
+    Pi -->|response| Worker -->|reply| Transport
 ```
 
 The Go bot receives messages from the configured backend, forwards them to the

@@ -58,3 +58,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace fiatjaf.com/nostr => github.com/Mic92/nostr v0.0.0-20260309214535-bf10dcd245b8

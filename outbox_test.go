@@ -2,29 +2,41 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"path/filepath"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
-// openTestStore creates a sentMessageStore backed by a temp directory
-// and registers cleanup. Returns the store and a background context.
-func openTestStore(t *testing.T) (*sentMessageStore, context.Context) {
+// openTestOutbox creates an outboxStore backed by a temp SQLite DB
+// and registers cleanup.
+func openTestOutbox(t *testing.T) *outboxStore {
 	t.Helper()
 
-	s, err := newSentMessageStore(context.Background(), t.TempDir())
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Cleanup(func() { s.Close() })
+	if _, err := db.ExecContext(context.Background(), dbSchema); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
 
-	return s, context.Background()
+	t.Cleanup(func() { db.Close() })
+
+	return newOutboxStore(db)
 }
 
-func TestSentMessageStore_PutAndGet(t *testing.T) {
+func TestOutbox_PutAndGet(t *testing.T) {
 	t.Parallel()
 
-	s, ctx := openTestStore(t)
+	s := openTestOutbox(t)
+	ctx := context.Background()
 
 	s.Put(ctx, "room1", "msg1", "hello")
 	s.Put(ctx, "room1", "msg2", "world")
@@ -51,10 +63,11 @@ func TestSentMessageStore_PutAndGet(t *testing.T) {
 	}
 }
 
-func TestSentMessageStore_EmptyIDIgnored(t *testing.T) {
+func TestOutbox_EmptyIDIgnored(t *testing.T) {
 	t.Parallel()
 
-	s, ctx := openTestStore(t)
+	s := openTestOutbox(t)
+	ctx := context.Background()
 
 	s.Put(ctx, "room1", "", "should be ignored")
 
@@ -63,13 +76,14 @@ func TestSentMessageStore_EmptyIDIgnored(t *testing.T) {
 	}
 }
 
-func TestSentMessageStore_Eviction(t *testing.T) {
+func TestOutbox_Eviction(t *testing.T) {
 	t.Parallel()
 
-	s, ctx := openTestStore(t)
+	s := openTestOutbox(t)
+	ctx := context.Background()
 
 	// Fill beyond the limit.
-	for i := range maxSentMessagesPerConversation + 10 {
+	for i := range maxOutboxPerConversation + 10 {
 		s.Put(ctx, "room1", fmt.Sprintf("msg%d", i), fmt.Sprintf("text%d", i))
 	}
 
@@ -81,7 +95,7 @@ func TestSentMessageStore_Eviction(t *testing.T) {
 	}
 
 	// The rest should still be there.
-	for i := 10; i < maxSentMessagesPerConversation+10; i++ {
+	for i := 10; i < maxOutboxPerConversation+10; i++ {
 		want := fmt.Sprintf("text%d", i)
 		if got := s.Get(ctx, "room1", fmt.Sprintf("msg%d", i)); got != want {
 			t.Errorf("msg%d = %q, want %q", i, got, want)
@@ -89,14 +103,15 @@ func TestSentMessageStore_Eviction(t *testing.T) {
 	}
 }
 
-func TestSentMessageStore_DuplicatePutNoCorruption(t *testing.T) {
+func TestOutbox_DuplicatePutNoCorruption(t *testing.T) {
 	t.Parallel()
 
-	s, ctx := openTestStore(t)
+	s := openTestOutbox(t)
+	ctx := context.Background()
 
 	// Insert max entries, then overwrite the first one. This must not
 	// create a duplicate in Order, which would break eviction.
-	for i := range maxSentMessagesPerConversation {
+	for i := range maxOutboxPerConversation {
 		s.Put(ctx, "room1", fmt.Sprintf("msg%d", i), fmt.Sprintf("text%d", i))
 	}
 
@@ -116,17 +131,14 @@ func TestSentMessageStore_DuplicatePutNoCorruption(t *testing.T) {
 	}
 }
 
-func TestSentMessageStore_GetCancelledContext(t *testing.T) {
+func TestOutbox_GetCancelledContext(t *testing.T) {
 	t.Parallel()
 
-	s, _ := openTestStore(t)
-
-	// Insert a message so a cache-miss is not the reason for "".
+	s := openTestOutbox(t)
 	bg := context.Background()
+
 	s.Put(bg, "room1", "msg1", "hello")
 
-	// Cancel the context before reading — should return "" without
-	// logging a scary error (context.Canceled is expected).
 	ctx, cancel := context.WithCancel(bg)
 	cancel()
 
@@ -135,48 +147,64 @@ func TestSentMessageStore_GetCancelledContext(t *testing.T) {
 	}
 }
 
-func TestSentMessageStore_GetAfterClose(t *testing.T) {
+func TestOutbox_GetAfterClose(t *testing.T) {
 	t.Parallel()
 
-	s, err := newSentMessageStore(context.Background(), t.TempDir())
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	if _, err := db.ExecContext(context.Background(), dbSchema); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+
+	s := newOutboxStore(db)
 	ctx := context.Background()
+
 	s.Put(ctx, "room1", "msg1", "hello")
 
 	// Close the DB to provoke a real (non-ErrNoRows) error on the next Get.
-	s.Close()
+	db.Close()
 
-	// Should return "" and log the unexpected error rather than panicking.
 	if got := s.Get(ctx, "room1", "msg1"); got != "" {
 		t.Errorf("Get after close = %q, want empty", got)
 	}
 }
 
-func TestSentMessageStore_Persistence(t *testing.T) {
+func TestOutbox_Persistence(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	// First store: write some messages.
-	s1, err := newSentMessageStore(context.Background(), dir)
+	// First connection: write some messages.
+	db1, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s1.Close()
 
+	if _, err := db1.ExecContext(ctx, dbSchema); err != nil {
+		db1.Close()
+		t.Fatal(err)
+	}
+
+	s1 := newOutboxStore(db1)
 	s1.Put(ctx, "room1", "msg1", "hello")
 	s1.Put(ctx, "room1", "msg2", "world")
+	db1.Close()
 
-	// Second store: loads from the same directory.
-	s2, err := newSentMessageStore(context.Background(), dir)
+	// Second connection: reads from the same file.
+	db2, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s2.Close()
+	defer db2.Close()
+
+	s2 := newOutboxStore(db2)
 
 	if got := s2.Get(ctx, "room1", "msg1"); got != "hello" {
 		t.Errorf("after reload, Get(room1, msg1) = %q, want %q", got, "hello")

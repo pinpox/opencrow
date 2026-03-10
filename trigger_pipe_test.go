@@ -1,197 +1,128 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"fmt"
+	"database/sql"
 	"os"
-	"os/exec"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
-// newFakePiProcess creates a PiProcess backed by a long-running subprocess
-// whose stdin/stdout we control via pipes. The returned writer sends
-// JSON lines that the PiProcess reads as RPC events.
-func newFakePiProcess(t *testing.T) (*PiProcess, *os.File) {
-	t.Helper()
-
-	stdinR, stdinW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	stdoutR, stdoutW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Start a real process so cmd.Process is non-nil and Kill() works.
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	cmd := exec.CommandContext(ctx, "sleep", "60")
-	cmd.Stdin = stdinR
-
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-
-	stdinR.Close()
-
-	done := make(chan struct{})
-
-	go func() {
-		_ = cmd.Wait()
-
-		close(done)
-	}()
-
-	scanner := bufio.NewScanner(stdoutR)
-	scanner.Buffer(make([]byte, scannerBufSize), scannerBufSize)
-
-	p := &PiProcess{
-		cmd:     cmd,
-		stdin:   stdinW,
-		stdout:  scanner,
-		done:    done,
-		lastUse: time.Now(),
-	}
-
-	t.Cleanup(func() {
-		p.Kill()
-		stdoutW.Close()
-		stdoutR.Close()
-	})
-
-	return p, stdoutW
-}
-
-func writeRPCEvent(t *testing.T, w *os.File, evt any) {
-	t.Helper()
-
-	data, err := json.Marshal(evt)
-	if err != nil {
-		t.Fatalf("marshaling RPC event: %v", err)
-	}
-
-	if _, err := fmt.Fprintf(w, "%s\n", data); err != nil {
-		t.Fatalf("writing RPC event: %v", err)
-	}
-}
-
-func setupTriggerTest(t *testing.T) (*PiProcess, *os.File, *PiPool, *TriggerPipeManager, string) {
-	t.Helper()
-
-	pi, stdoutW := newFakePiProcess(t)
-
-	cfg := PiConfig{
-		SessionDir: t.TempDir(),
-		BinaryPath: "sleep",
-	}
-	pool := NewPiPool(cfg)
-
-	roomID := "!testroom"
-
-	pool.mu.Lock()
-	pool.processes[roomID] = pi
-	pool.mu.Unlock()
-
-	sendReply := func(_ context.Context, _ string, _ string) {}
-	setTyping := func(_ context.Context, _ string, _ bool) {}
-
-	triggerMgr := NewTriggerPipeManager(pool, cfg, "trigger prompt",
-		sendReply, setTyping,
-	)
-
-	return pi, stdoutW, pool, triggerMgr, roomID
-}
-
-// TestTriggerAbortDoesNotKillProcess reproduces the scenario where a user
-// message aborts a running trigger, and the trigger's error handler
-// must not kill the pi process — otherwise the user's prompt writes to
-// a closed stdin pipe.
-func TestTriggerAbortDoesNotKillProcess(t *testing.T) {
+func TestTriggerPipeReader_EnqueuesLines(t *testing.T) {
 	t.Parallel()
 
-	pi, stdoutW, pool, triggerMgr, roomID := setupTriggerTest(t)
+	ctx := t.Context()
 
-	triggerDone := make(chan struct{})
+	dbPath := t.TempDir() + "/test.db"
 
-	go func() {
-		defer close(triggerDone)
-
-		triggerMgr.processTrigger(context.Background(), roomID, "calendar update")
-	}()
-
-	// Wait for the trigger to acquire the lock and block on reading stdout.
-	time.Sleep(50 * time.Millisecond)
-
-	// User message arrives — Prompt() will TryLock, fail, Abort the trigger,
-	// then Lock and try to send a prompt.
-	userDone := make(chan error, 1)
-
-	go func() {
-		_, err := pi.Prompt(context.Background(), "user says no")
-		userDone <- err
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Send agent_end for the aborted trigger so the read goroutine unblocks.
-	writeRPCEvent(t, stdoutW, map[string]any{
-		"type": "agent_end",
-		"messages": []map[string]any{
-			{"role": "assistant", "content": "trigger response"},
-		},
-	})
-
-	select {
-	case <-triggerDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("trigger did not finish in time")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if !pi.IsAlive() {
-		t.Fatal("pi process was killed by trigger error handler; user prompt will fail with broken pipe")
+	defer db.Close()
+
+	if _, err := db.ExecContext(ctx, dbSchema); err != nil {
+		t.Fatal(err)
 	}
 
-	// Send agent_end for the user's prompt.
-	writeRPCEvent(t, stdoutW, map[string]any{
-		"type": "agent_end",
-		"messages": []map[string]any{
-			{"role": "assistant", "content": "thumbs up"},
-		},
-	})
+	inbox, err := NewInboxStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	select {
-	case err := <-userDone:
-		if err != nil {
-			t.Fatalf("user prompt failed: %v", err)
+	dir := t.TempDir()
+
+	worker := NewWorker(inbox, PiConfig{SessionDir: dir}, HeartbeatConfig{}, "")
+	startTriggerPipe(ctx, worker, dir)
+
+	pipePath := TriggerPipePath(dir)
+	waitForFIFO(t, pipePath)
+	writeToPipe(t, pipePath, "first trigger\nsecond trigger\n")
+	waitForInboxCount(ctx, t, inbox, 2)
+
+	item1, err := inbox.Dequeue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if item1.Source != sourceTrigger {
+		t.Errorf("item1.Source = %q, want %q", item1.Source, sourceTrigger)
+	}
+
+	if item1.Priority != PriorityTrigger {
+		t.Errorf("item1.Priority = %d, want %d", item1.Priority, PriorityTrigger)
+	}
+
+	if item1.Content != "first trigger" {
+		t.Errorf("item1.Content = %q, want %q", item1.Content, "first trigger")
+	}
+
+	item2, err := inbox.Dequeue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if item2.Content != "second trigger" {
+		t.Errorf("item2.Content = %q, want %q", item2.Content, "second trigger")
+	}
+}
+
+func waitForFIFO(t *testing.T, path string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for time.Now().Before(deadline) {
+		info, err := os.Lstat(path)
+		if err == nil && info.Mode()&os.ModeNamedPipe != 0 {
+			return
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("user prompt did not finish in time")
+
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	if p := pool.GetExisting(roomID); p == nil {
-		t.Error("pi process was removed from pool")
+	t.Fatalf("FIFO not created at %s within timeout", path)
+}
+
+func writeToPipe(t *testing.T, path, content string) {
+	t.Helper()
+
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer f.Close()
+
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// TestTriggerRealErrorStillKillsProcess verifies that genuine failures
-// still cause the process to be removed from the pool.
-func TestTriggerRealErrorStillKillsProcess(t *testing.T) {
-	t.Parallel()
+func waitForInboxCount(ctx context.Context, t *testing.T, inbox *InboxStore, want int64) {
+	t.Helper()
 
-	_, stdoutW, pool, triggerMgr, roomID := setupTriggerTest(t)
+	deadline := time.Now().Add(2 * time.Second)
 
-	// Close stdout to simulate a pi process crash.
-	stdoutW.Close()
+	var lastErr error
 
-	triggerMgr.processTrigger(context.Background(), roomID, "some trigger")
+	for time.Now().Before(deadline) {
+		count, err := inbox.Count(ctx)
+		if err != nil {
+			lastErr = err
+		} else if count >= want {
+			return
+		}
 
-	if p := pool.GetExisting(roomID); p != nil {
-		t.Error("pi process should have been removed from pool after a real error")
+		time.Sleep(10 * time.Millisecond)
 	}
+
+	if lastErr != nil {
+		t.Fatalf("inbox count did not reach %d within timeout (last error: %v)", want, lastErr)
+	}
+
+	t.Fatalf("inbox count did not reach %d within timeout", want)
 }
