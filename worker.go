@@ -408,6 +408,7 @@ func (w *Worker) processCompact(ctx context.Context) {
 	w.mu.Lock()
 	ch := w.compactResult
 	w.compactResult = nil
+	pi := w.pi
 	w.mu.Unlock()
 
 	if ch == nil {
@@ -415,10 +416,6 @@ func (w *Worker) processCompact(ctx context.Context) {
 
 		return
 	}
-
-	w.mu.Lock()
-	pi := w.pi
-	w.mu.Unlock()
 
 	if pi == nil || !pi.IsAlive() {
 		ch <- compactOutcome{err: errors.New("no active session")}

@@ -44,13 +44,12 @@ type PiProcess struct {
 	onToolCall func(ToolCallEvent) // optional callback for tool_execution_start events
 }
 
-// rpcParsed is sent from the stdout reader goroutine to the caller for
-// every parsed event. The caller handles stdin writes (extension UI
-// responses, abort) so all writes stay in one goroutine.
+// rpcParsed is sent from the persistent stdout reader to the caller.
+// On normal events err is nil; on scanner errors err is set and event
+// is meaningless. EOF is signalled by closing the channel.
 type rpcParsed struct {
 	event rpcEvent
-	err   error // non-nil means the reader encountered a terminal error
-	eof   bool  // reader finished (stdout closed)
+	err   error
 }
 
 // StartPi spawns a pi --mode rpc subprocess for the given room.
@@ -293,9 +292,11 @@ func (p *PiProcess) sendAbort() {
 
 // readEvents scans pi's stdout line by line, parses each JSON event,
 // and sends it to ch. Started once per process in startPiProcess;
-// the goroutine owns the scanner for the process lifetime. Blocks
-// until stdout is closed, then sends an eof sentinel and returns.
+// the goroutine owns the scanner for the process lifetime. Closes ch
+// when stdout is closed (EOF) or a scanner error occurs.
 func readEvents(scanner *bufio.Scanner, ch chan<- rpcParsed) {
+	defer close(ch)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -316,11 +317,7 @@ func readEvents(scanner *bufio.Scanner, ch chan<- rpcParsed) {
 
 	if err := scanner.Err(); err != nil {
 		ch <- rpcParsed{err: fmt.Errorf("reading pi stdout: %w", err)}
-
-		return
 	}
-
-	ch <- rpcParsed{eof: true}
 }
 
 // drainEvents runs the caller-side event loop: it reads parsed events
@@ -336,10 +333,6 @@ func (p *PiProcess) drainEvents(ctx context.Context, handleFn func(rpcEvent) (bo
 	for parsed := range p.events {
 		if parsed.err != nil {
 			return parsed.err
-		}
-
-		if parsed.eof {
-			return errors.New("pi process closed stdout (EOF)")
 		}
 
 		// Check for cancellation before processing.
@@ -367,7 +360,8 @@ func (p *PiProcess) drainEvents(ctx context.Context, handleFn func(rpcEvent) (bo
 		}
 	}
 
-	return errors.New("event channel closed unexpectedly")
+	// Channel closed = stdout EOF.
+	return errors.New("pi process closed stdout (EOF)")
 }
 
 // handleSideEffects processes events that are common to all commands:
@@ -428,10 +422,7 @@ func (p *PiProcess) waitForCompactResponse(ctx context.Context) (*CompactResult,
 			return false, nil
 		}
 
-		if evt.Success != nil && !*evt.Success {
-			return false, fmt.Errorf("compact failed: %s", evt.Error)
-		}
-
+		// Failed responses are already caught by handleSideEffects.
 		var cr CompactResult
 		if err := json.Unmarshal(evt.Data, &cr); err != nil {
 			return false, fmt.Errorf("parsing compact result: %w", err)
