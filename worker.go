@@ -255,11 +255,16 @@ func (w *Worker) drainOnce(ctx context.Context) {
 			return
 		}
 
-		w.processItem(ctx, item)
+		if w.processItem(ctx, item) {
+			return
+		}
 	}
 }
 
-func (w *Worker) processItem(ctx context.Context, item Inbox) {
+// processItem handles one inbox item. Returns true if drainOnce should
+// stop looping (e.g. an item was requeued and should wait for a future
+// Notify rather than spinning).
+func (w *Worker) processItem(ctx context.Context, item Inbox) bool {
 	slog.Info("worker: processing", "source", item.Source, "priority", item.Priority, "id", item.ID)
 
 	itemCtx, cancel := context.WithCancel(ctx)
@@ -280,23 +285,23 @@ func (w *Worker) processItem(ctx context.Context, item Inbox) {
 	if item.Source == sourceCompact {
 		w.processCompact(itemCtx)
 
-		return
+		return false
 	}
 
-	w.processPrompt(itemCtx, item)
+	return w.processPrompt(itemCtx, item)
 }
 
-func (w *Worker) processPrompt(ctx context.Context, item Inbox) {
+// processPrompt handles a user/trigger/heartbeat item. Returns true if
+// the caller should stop draining (item was requeued).
+func (w *Worker) processPrompt(ctx context.Context, item Inbox) bool {
 	prompt, ok := w.buildPrompt(item)
 	if !ok {
-		return
+		return false
 	}
 
 	convID := w.resolveRoomID()
 	if convID == "" {
-		w.handleNoRoomID(item) //nolint:contextcheck // requeue uses context.Background intentionally
-
-		return
+		return w.handleNoRoomID(item) //nolint:contextcheck // requeue uses context.Background intentionally
 	}
 
 	w.be.SetTyping(ctx, convID, true)
@@ -304,20 +309,12 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) {
 
 	pi, err := w.ensurePi(ctx)
 	if err != nil {
-		slog.Error("worker: failed to start pi", "source", item.Source, "error", err)
-
-		if item.Source == sourceUser {
-			w.be.SendMessage(ctx, convID, fmt.Sprintf("Error starting AI backend: %v", err), "")
-		}
-
-		return
+		return w.handlePiError(ctx, item, convID, "failed to start pi", err, false)
 	}
 
 	reply, err := pi.sendAndWait(ctx, prompt)
 	if err != nil {
-		w.handlePromptError(ctx, item, convID, err)
-
-		return
+		return w.handlePiError(ctx, item, convID, "pi prompt failed", err, true)
 	}
 
 	w.mu.Lock()
@@ -329,10 +326,12 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) {
 	}
 
 	if shouldSuppressReply(reply, item.Source) {
-		return
+		return false
 	}
 
 	w.app.sendReplyWithFiles(ctx, convID, reply, item.ReplyTo)
+
+	return false
 }
 
 func (w *Worker) buildPrompt(item Inbox) (string, bool) {
@@ -353,7 +352,10 @@ func (w *Worker) buildPrompt(item Inbox) (string, bool) {
 	}
 }
 
-func (w *Worker) handleNoRoomID(item Inbox) {
+// handleNoRoomID requeues triggers (room may appear later) and drops
+// everything else. Returns true if the item was requeued, signalling
+// drainOnce to stop looping and wait for the next Notify.
+func (w *Worker) handleNoRoomID(item Inbox) bool {
 	if item.Source == sourceTrigger {
 		if err := w.inbox.Requeue(context.Background(), item); err != nil {
 			slog.Error("worker: failed to requeue trigger (item lost)", "error", err)
@@ -361,31 +363,49 @@ func (w *Worker) handleNoRoomID(item Inbox) {
 			slog.Info("worker: no room ID for trigger, requeued")
 		}
 
-		return
+		return true
 	}
 
 	slog.Error("worker: no room ID available, dropping item", "source", item.Source)
+
+	return false
 }
 
-func (w *Worker) handlePromptError(ctx context.Context, item Inbox, convID string, err error) {
+// handlePiError handles errors from ensurePi or sendAndWait. Preempted
+// items are requeued; terminal failures kill the process and notify the
+// user. Returns true if drainOnce should stop.
+func (w *Worker) handlePiError(ctx context.Context, item Inbox, convID, label string, err error, killPi bool) bool {
 	if wasPreempted(ctx, err) {
-		slog.Info("worker: preempted", "source", item.Source)
-
-		if item.Source != sourceHeartbeat {
-			if err := w.inbox.Requeue(context.Background(), item); err != nil { //nolint:contextcheck // item ctx is cancelled; need a live ctx to persist
-				slog.Error("worker: failed to requeue after preemption (item lost)", "source", item.Source, "error", err)
-			}
-		}
-
-		return
+		return w.requeuePreempted(item) //nolint:contextcheck // item ctx is cancelled; requeue uses background ctx
 	}
 
-	slog.Error("worker: pi prompt failed", "source", item.Source, "error", err)
-	w.stopPi()
+	slog.Error("worker: "+label, "source", item.Source, "error", err)
+
+	if killPi {
+		w.stopPi()
+	}
 
 	if item.Source == sourceUser {
 		w.be.SendMessage(ctx, convID, fmt.Sprintf("Error: %v", err), "")
 	}
+
+	return false
+}
+
+// requeuePreempted re-inserts a preempted item (except heartbeats).
+// Returns true so drainOnce stops and re-enters via the new Notify.
+func (w *Worker) requeuePreempted(item Inbox) bool {
+	slog.Info("worker: preempted", "source", item.Source)
+
+	if item.Source == sourceHeartbeat {
+		return true
+	}
+
+	if err := w.inbox.Requeue(context.Background(), item); err != nil {
+		slog.Error("worker: failed to requeue after preemption (item lost)", "source", item.Source, "error", err)
+	}
+
+	return true
 }
 
 func (w *Worker) processCompact(ctx context.Context) {
