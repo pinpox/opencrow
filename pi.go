@@ -28,14 +28,19 @@ type ToolCallEvent struct {
 // The caller (Worker) is responsible for serializing access — only one
 // goroutine calls sendAndWait at a time, so no mutex is needed.
 //
+// A single persistent reader goroutine owns stdout and pushes parsed
+// events into the events channel. Command waiters (sendAndWait,
+// Compact) consume from this channel until they see their terminal
+// event. This avoids scanner races from per-command reader goroutines.
+//
 // All stdin writes happen in the caller goroutine. The stdout reader
-// goroutine never writes to stdin directly; it sends extension UI
-// requests back through a channel so the caller can respond.
+// goroutine never writes to stdin directly; extension UI requests are
+// handled by the caller when it processes events.
 type PiProcess struct {
 	cmd        *exec.Cmd
 	stdin      io.WriteCloser
-	stdout     *bufio.Scanner
 	done       chan struct{}
+	events     <-chan rpcParsed    // single persistent reader feeds all waiters
 	onToolCall func(ToolCallEvent) // optional callback for tool_execution_start events
 }
 
@@ -205,11 +210,18 @@ func startPiProcess(cmd *exec.Cmd, sessionDir string) (*PiProcess, error) {
 		slog.Info("pi process exited")
 	}()
 
+	// Start a single persistent reader goroutine that owns the
+	// scanner for the lifetime of the process. All command waiters
+	// read from this channel, avoiding concurrent scanner access.
+	eventCh := make(chan rpcParsed, 4)
+
+	go readEvents(scanner, eventCh)
+
 	return &PiProcess{
 		cmd:    cmd,
 		stdin:  stdinPipe,
-		stdout: scanner,
 		done:   done,
+		events: eventCh,
 	}, nil
 }
 
@@ -280,13 +292,12 @@ func (p *PiProcess) sendAbort() {
 }
 
 // readEvents scans pi's stdout line by line, parses each JSON event,
-// and sends it to the caller through ch. The caller goroutine handles
-// all stdin writes (abort, extension UI responses). Blocks until stdout
-// is closed or a parse error occurs, then sends an eof/error sentinel
-// and returns.
-func (p *PiProcess) readEvents(ch chan<- rpcParsed) {
-	for p.stdout.Scan() {
-		line := p.stdout.Text()
+// and sends it to ch. Started once per process in startPiProcess;
+// the goroutine owns the scanner for the process lifetime. Blocks
+// until stdout is closed, then sends an eof sentinel and returns.
+func readEvents(scanner *bufio.Scanner, ch chan<- rpcParsed) {
+	for scanner.Scan() {
+		line := scanner.Text()
 		if line == "" {
 			continue
 		}
@@ -303,7 +314,7 @@ func (p *PiProcess) readEvents(ch chan<- rpcParsed) {
 		ch <- rpcParsed{event: evt}
 	}
 
-	if err := p.stdout.Err(); err != nil {
+	if err := scanner.Err(); err != nil {
 		ch <- rpcParsed{err: fmt.Errorf("reading pi stdout: %w", err)}
 
 		return
@@ -313,15 +324,16 @@ func (p *PiProcess) readEvents(ch chan<- rpcParsed) {
 }
 
 // drainEvents runs the caller-side event loop: it reads parsed events
-// from the reader goroutine, handles side effects (extension UI cancel,
+// from the persistent reader, handles side effects (extension UI cancel,
 // tool call notifications), and calls handleFn for each event.
 // handleFn returns true when the desired termination event has been
-// seen. On context cancellation an abort is sent and remaining events
-// are drained.
-func (p *PiProcess) drainEvents(ctx context.Context, ch <-chan rpcParsed, handleFn func(rpcEvent) (bool, error)) error {
+// seen. On context cancellation an abort is sent; drainEvents
+// continues calling handleFn so it can detect the terminal event
+// (e.g. agent_end) and return promptly instead of blocking until EOF.
+func (p *PiProcess) drainEvents(ctx context.Context, handleFn func(rpcEvent) (bool, error)) error {
 	aborted := false
 
-	for parsed := range ch {
+	for parsed := range p.events {
 		if parsed.err != nil {
 			return parsed.err
 		}
@@ -337,10 +349,10 @@ func (p *PiProcess) drainEvents(ctx context.Context, ch <-chan rpcParsed, handle
 			aborted = true
 		}
 
-		if aborted {
-			continue // drain remaining events after abort
-		}
-
+		// Always process the event even after abort so we detect the
+		// terminal event (agent_end / compact response) and return
+		// promptly. Without this the loop would block until EOF,
+		// hanging when pi stays alive after acknowledging the abort.
 		if err := p.handleSideEffects(parsed.event); err != nil {
 			return err
 		}
@@ -383,13 +395,9 @@ func (p *PiProcess) handleSideEffects(evt rpcEvent) error {
 }
 
 func (p *PiProcess) waitForResult(ctx context.Context) (string, error) {
-	ch := make(chan rpcParsed, 4)
-
-	go p.readEvents(ch)
-
 	var reply string
 
-	err := p.drainEvents(ctx, ch, func(evt rpcEvent) (bool, error) {
+	err := p.drainEvents(ctx, func(evt rpcEvent) (bool, error) {
 		if evt.Type != "agent_end" {
 			return false, nil
 		}
@@ -413,13 +421,9 @@ func (p *PiProcess) waitForResult(ctx context.Context) (string, error) {
 }
 
 func (p *PiProcess) waitForCompactResponse(ctx context.Context) (*CompactResult, error) {
-	ch := make(chan rpcParsed, 4)
-
-	go p.readEvents(ch)
-
 	var result *CompactResult
 
-	err := p.drainEvents(ctx, ch, func(evt rpcEvent) (bool, error) {
+	err := p.drainEvents(ctx, func(evt rpcEvent) (bool, error) {
 		if evt.Type != "response" || evt.Command != "compact" {
 			return false, nil
 		}
