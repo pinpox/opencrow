@@ -31,6 +31,13 @@ var dbSchema string
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: parseLogLevel(os.Getenv("OPENCROW_LOG_LEVEL")),
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+
+			return a
+		},
 	})))
 
 	os.Exit(run())
