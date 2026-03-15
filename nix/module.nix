@@ -23,8 +23,7 @@ let
     builtins.toJSON ({ extensions = lib.attrValues cfg.extensions; } // cfg.piSettings)
   );
 
-  # Host-side wrapper to run pi inside the container as the opencrow user,
-  # e.g. `opencrow-pi auth login` to complete OAuth.
+  # Host-side wrapper to interact with pi inside the container as the opencrow user.
   opencrowPi = pkgs.writeShellScriptBin "opencrow-pi" ''
     exec machinectl shell opencrow@opencrow \
       /run/current-system/sw/bin/env \
@@ -355,7 +354,7 @@ in
       }
     ];
 
-    # Host-side wrapper for interactive pi usage (e.g. opencrow-pi auth login).
+    # Host-side wrapper for interactive pi usage inside the container.
     environment.systemPackages = [ opencrowPi ];
 
     # Host-side directory needed for the bind mount into the container.
