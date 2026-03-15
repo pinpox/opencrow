@@ -16,11 +16,21 @@ let
     lib.mapAttrsToList (name: path: { inherit name path; }) cfg.skills
   );
 
+  # Resolve extension values: `true` means use the corresponding
+  # extension package from the opencrow flake, a path is used as-is.
+  resolvedExtensions = lib.mapAttrs (
+    name: value:
+    if value == true then
+      self.packages.${pkgs.hostPlatform.system}."extension-${name}"
+    else
+      value
+  ) (lib.filterAttrs (_: v: v != false) cfg.extensions);
+
   # Generate a settings.json for pi that lists declared extensions.
   # Installed into PI_CODING_AGENT_DIR at service startup so pi
   # auto-discovers them.
   piSettingsJson = pkgs.writeText "pi-settings.json" (
-    builtins.toJSON ({ extensions = lib.attrValues cfg.extensions; } // cfg.piSettings)
+    builtins.toJSON ({ extensions = lib.attrValues resolvedExtensions; } // cfg.piSettings)
   );
 
   # Host-side wrapper to interact with pi inside the container as the opencrow user.
@@ -71,18 +81,29 @@ in
     };
 
     extensions = lib.mkOption {
-      type = lib.types.attrsOf lib.types.path;
+      type = lib.types.attrsOf (
+        lib.types.either lib.types.bool lib.types.path
+      );
       default = { };
       description = ''
         Pi extension files or directories to make available, keyed by
-        name. Each value must be a path to a .ts file or a directory
-        containing an index.ts. All paths are written into a generated
-        settings.json that pi reads from PI_CODING_AGENT_DIR.
+        name. Each value can be:
+        - `true` to enable a packaged extension shipped with opencrow
+          (resolved from the flake's `extension-''${name}` package output)
+        - `false` to explicitly disable an extension
+        - A path to a .ts file or directory containing an index.ts
+
+        All enabled extensions are written into a generated settings.json
+        that pi reads from PI_CODING_AGENT_DIR.
+
+        Bundled extensions: `memory` (cross-session recall via sediment).
       '';
       example = lib.literalExpression ''
         {
+          # Enable the bundled memory extension
+          memory = true;
+          # Custom extension from a local path
           my-ext = ./extensions/my-ext.ts;
-          permission-gate = "''${pkgs.fetchFromGitHub { owner = "someone"; repo = "pi-extensions"; rev = "main"; hash = "..."; }}/permission-gate";
         }
       '';
     };
@@ -353,6 +374,11 @@ in
         message = "OPENCROW_NOSTR_PRIVATE_KEY_FILE, environmentFiles, or credentialFiles is required when OPENCROW_BACKEND is nostr.";
       }
     ];
+
+    # Default SEDIMENT_DB when memory extension is enabled.
+    services.opencrow.environment.SEDIMENT_DB = lib.mkIf (cfg.extensions.memory or false == true) (
+      lib.mkDefault "/var/lib/opencrow/sediment"
+    );
 
     # Host-side wrapper for interactive pi usage inside the container.
     environment.systemPackages = [ opencrowPi ];
