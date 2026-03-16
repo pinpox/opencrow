@@ -46,6 +46,64 @@ func (b *Backend) sendDM(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Po
 	return rumor.ID.Hex()
 }
 
+// sendFileMessage sends a NIP-17 kind 15 file message. The URL is the rumor
+// content and extraTags carry file metadata (mime type, encryption params).
+func (b *Backend) sendFileMessage(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Pool, recipientPK gonostr.PubKey, fileURL string, extraTags gonostr.Tags) {
+	rumor, err := b.buildFileRumor(ctx, kr, recipientPK, fileURL, extraTags)
+	if err != nil {
+		slog.Error("nostr: failed to build file rumor", "recipient", recipientPK.Hex(), "error", err)
+
+		return
+	}
+
+	toUs, err := nip59.GiftWrap(rumor, rumor.PubKey,
+		func(s string) (string, error) { return kr.Encrypt(ctx, s, rumor.PubKey) },
+		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
+		nil,
+	)
+	if err != nil {
+		slog.Error("nostr: failed to gift-wrap file msg (toUs)", "recipient", recipientPK.Hex(), "error", err)
+
+		return
+	}
+
+	toThem, err := nip59.GiftWrap(rumor, recipientPK,
+		func(s string) (string, error) { return kr.Encrypt(ctx, s, recipientPK) },
+		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
+		nil,
+	)
+	if err != nil {
+		slog.Error("nostr: failed to gift-wrap file msg (toThem)", "recipient", recipientPK.Hex(), "error", err)
+
+		return
+	}
+
+	b.publishDMGiftWraps(ctx, pool, toUs, toThem, recipientPK)
+}
+
+// buildFileRumor constructs a kind 15 rumor event for a file message.
+func (b *Backend) buildFileRumor(ctx context.Context, kr gonostr.Keyer, recipientPK gonostr.PubKey, fileURL string, extraTags gonostr.Tags) (gonostr.Event, error) {
+	ourPubkey, err := kr.GetPublicKey(ctx)
+	if err != nil {
+		return gonostr.Event{}, fmt.Errorf("getting public key: %w", err)
+	}
+
+	tags := make(gonostr.Tags, 0, len(extraTags)+1)
+	tags = append(tags, gonostr.Tag{"p", recipientPK.Hex()})
+	tags = append(tags, extraTags...)
+
+	rumor := gonostr.Event{
+		Kind:      KindFileMessage,
+		Content:   fileURL,
+		Tags:      tags,
+		CreatedAt: gonostr.Now(),
+		PubKey:    ourPubkey,
+	}
+	rumor.ID = rumor.GetID()
+
+	return rumor, nil
+}
+
 // buildDMRumor constructs and returns a kind 14 rumor event for a DM.
 func (b *Backend) buildDMRumor(ctx context.Context, kr gonostr.Keyer, recipientPK gonostr.PubKey, text string, extraTags gonostr.Tags) (gonostr.Event, error) {
 	ourPubkey, err := kr.GetPublicKey(ctx)

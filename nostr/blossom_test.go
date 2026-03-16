@@ -2,6 +2,7 @@ package nostr
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +15,17 @@ import (
 	gonostr "fiatjaf.com/nostr"
 	"github.com/pinpox/opencrow/backend"
 )
+
+func mustDecodeHex(t *testing.T, s string) []byte {
+	t.Helper()
+
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("decoding hex %q: %v", s, err)
+	}
+
+	return b
+}
 
 // newBlossomTestBackend creates a Backend configured with the given blossom servers.
 func newBlossomTestBackend(t *testing.T, servers []string) *Backend {
@@ -52,6 +64,7 @@ func writeTempFile(t *testing.T, name string, data []byte) string {
 func TestSendFile_UploadsToBlossom(t *testing.T) {
 	t.Parallel()
 
+	plaintext := []byte("fake image data")
 	var receivedBody []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,22 +81,41 @@ func TestSendFile_UploadsToBlossom(t *testing.T) {
 	defer srv.Close()
 
 	b := newBlossomTestBackend(t, []string{srv.URL})
-	tmpFile := writeTempFile(t, "test.png", []byte("fake image data"))
+	tmpFile := writeTempFile(t, "test.png", plaintext)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	url, err := b.uploadToBlossomImpl(ctx, tmpFile)
+	upload, err := b.uploadToBlossomImpl(ctx, tmpFile)
 	if err != nil {
 		t.Fatalf("uploadToBlossom: %v", err)
 	}
 
-	if url != "https://blossom.example.com/abc123" {
-		t.Errorf("url = %q, want %q", url, "https://blossom.example.com/abc123")
+	if upload.URL != "https://blossom.example.com/abc123" {
+		t.Errorf("url = %q, want %q", upload.URL, "https://blossom.example.com/abc123")
 	}
 
-	if string(receivedBody) != "fake image data" {
-		t.Errorf("server received %q, want %q", receivedBody, "fake image data")
+	if upload.MIMEType != "image/png" {
+		t.Errorf("mime = %q, want %q", upload.MIMEType, "image/png")
+	}
+
+	// Server must receive ciphertext, not plaintext.
+	if string(receivedBody) == string(plaintext) {
+		t.Error("server received plaintext; want encrypted ciphertext")
+	}
+
+	// Verify we can decrypt the ciphertext back to the original.
+	decrypted, err := decryptAESGCM(
+		mustDecodeHex(t, upload.Enc.KeyHex),
+		mustDecodeHex(t, upload.Enc.NonceHex),
+		receivedBody,
+	)
+	if err != nil {
+		t.Fatalf("decrypting uploaded data: %v", err)
+	}
+
+	if string(decrypted) != string(plaintext) {
+		t.Errorf("decrypted = %q, want %q", decrypted, plaintext)
 	}
 }
 
@@ -109,13 +141,13 @@ func TestSendFile_BlossomFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	url, err := b.uploadToBlossomImpl(ctx, tmpFile)
+	upload, err := b.uploadToBlossomImpl(ctx, tmpFile)
 	if err != nil {
 		t.Fatalf("uploadToBlossom: %v", err)
 	}
 
-	if url != "https://blossom2.example.com/def456" {
-		t.Errorf("url = %q, want fallback URL", url)
+	if upload.URL != "https://blossom2.example.com/def456" {
+		t.Errorf("url = %q, want fallback URL", upload.URL)
 	}
 }
 

@@ -224,14 +224,35 @@ func (b *Backend) SendMessage(ctx context.Context, conversationID string, text s
 	return b.sendDM(ctx, b.kr, b.pool, recipientPK, text, extraTags)
 }
 
-// SendFile uploads a file to Blossom and sends the URL as a DM.
+// SendFile encrypts a file with AES-256-GCM, uploads the ciphertext to
+// Blossom, and sends the URL as a NIP-17 kind 15 file message. The
+// decryption key and nonce are included in the encrypted rumor tags so
+// only the conversation partner can read the file.
 func (b *Backend) SendFile(ctx context.Context, conversationID string, filePath string) error {
-	url, err := b.uploadToBlossomImpl(ctx, filePath)
+	upload, err := b.uploadToBlossomImpl(ctx, filePath)
 	if err != nil {
 		return err
 	}
 
-	b.SendMessage(ctx, conversationID, url, "")
+	recipientPK, err := gonostr.PubKeyFromHex(conversationID)
+	if err != nil {
+		return fmt.Errorf("invalid recipient pubkey: %w", err)
+	}
+
+	if b.kr == nil {
+		return fmt.Errorf("SendFile called before Run()")
+	}
+
+	tags := gonostr.Tags{
+		{"file-type", upload.MIMEType},
+		{"encryption-algorithm", "aes-gcm"},
+		{"decryption-key", upload.Enc.KeyHex},
+		{"decryption-nonce", upload.Enc.NonceHex},
+		{"x", upload.XHex},
+		{"ox", upload.Enc.OxHex},
+	}
+
+	b.sendFileMessage(ctx, b.kr, b.pool, recipientPK, upload.URL, tags)
 
 	return nil
 }

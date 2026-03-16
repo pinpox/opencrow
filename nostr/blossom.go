@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,32 +25,47 @@ import (
 	gonostr "fiatjaf.com/nostr"
 )
 
-// uploadToBlossom uploads a file to the configured Blossom servers with fallback.
-// Returns the URL on success.
-func (b *Backend) uploadToBlossomImpl(ctx context.Context, filePath string) (string, error) {
+// blossomUpload holds the result of an encrypted file upload to Blossom.
+type blossomUpload struct {
+	URL          string         // Blossom URL of the ciphertext blob
+	MIMEType     string         // MIME type of the original plaintext file
+	XHex         string         // SHA-256 of the ciphertext (NIP-17 "x" tag)
+	Enc          *encryptedFile // encryption parameters for the recipient
+}
+
+// uploadToBlossomImpl encrypts a file with AES-256-GCM and uploads the
+// ciphertext to the configured Blossom servers. The plaintext never leaves
+// the machine; only the recipient (who receives the key inside the encrypted
+// kind 15 rumor) can decrypt it.
+func (b *Backend) uploadToBlossomImpl(ctx context.Context, filePath string) (*blossomUpload, error) {
 	if len(b.cfg.BlossomServers) == 0 {
-		return "", errors.New("no blossom servers configured")
+		return nil, errors.New("no blossom servers configured")
 	}
 
-	data, err := os.ReadFile(filePath)
+	plaintext, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("reading file: %w", err)
+		return nil, fmt.Errorf("reading file: %w", err)
 	}
 
-	hash := sha256.Sum256(data)
-	hashHex := hex.EncodeToString(hash[:])
+	mimeType := detectContentType(filePath, plaintext)
 
-	contentType := http.DetectContentType(data)
+	enc, err := encryptFileForUpload(plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting file: %w", err)
+	}
+
+	hash := sha256.Sum256(enc.Ciphertext)
+	hashHex := hex.EncodeToString(hash[:])
 
 	// Build kind 24242 auth event
 	authEvt, err := buildBlossomAuthEvent(hashHex, b.keys)
 	if err != nil {
-		return "", fmt.Errorf("building auth event: %w", err)
+		return nil, fmt.Errorf("building auth event: %w", err)
 	}
 
 	evtJSON, err := json.Marshal(authEvt)
 	if err != nil {
-		return "", fmt.Errorf("marshaling auth event: %w", err)
+		return nil, fmt.Errorf("marshaling auth event: %w", err)
 	}
 
 	authHeader := "Nostr " + base64.StdEncoding.EncodeToString(evtJSON)
@@ -58,7 +74,7 @@ func (b *Backend) uploadToBlossomImpl(ctx context.Context, filePath string) (str
 	var lastErr error
 
 	for _, server := range b.cfg.BlossomServers {
-		url, err := uploadToServer(ctx, server, data, contentType, authHeader, hashHex)
+		url, err := uploadToServer(ctx, server, enc.Ciphertext, mimeType, authHeader, hashHex)
 		if err != nil {
 			slog.Warn("nostr: blossom upload failed", "server", server, "error", err)
 			lastErr = err
@@ -68,10 +84,22 @@ func (b *Backend) uploadToBlossomImpl(ctx context.Context, filePath string) (str
 
 		slog.Info("nostr: uploaded to blossom", "server", server, "url", url)
 
-		return url, nil
+		return &blossomUpload{URL: url, MIMEType: mimeType, XHex: hashHex, Enc: enc}, nil
 	}
 
-	return "", fmt.Errorf("all blossom servers failed, last error: %w", lastErr)
+	return nil, fmt.Errorf("all blossom servers failed, last error: %w", lastErr)
+}
+
+// detectContentType determines the MIME type for a file from its extension,
+// falling back to http.DetectContentType for byte sniffing.
+func detectContentType(filePath string, data []byte) string {
+	if ext := filepath.Ext(filePath); ext != "" {
+		if ct := mime.TypeByExtension(ext); ct != "" {
+			return ct
+		}
+	}
+
+	return http.DetectContentType(data)
 }
 
 func uploadToServer(ctx context.Context, server string, data []byte, contentType, authHeader, hashHex string) (string, error) {
