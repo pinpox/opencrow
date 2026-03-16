@@ -91,6 +91,30 @@ You must register or link your Signal account with signal-cli before running Ope
 | `OPENCROW_SIGNAL_SOCKET_PATH` | No | Unix socket path for signal-cli daemon JSON-RPC (default: `/var/lib/opencrow/signal-cli/opencrow-jsonrpc.sock`) |
 | `OPENCROW_ALLOWED_USERS` | No | Additional comma-separated sender IDs allowlist filter |
 
+### Signal account setup
+
+The NixOS module installs an `opencrow-signal-cli` wrapper on the host that
+runs signal-cli inside the container with the correct config directory. Use it
+to register or link an account before starting the service.
+
+**Option A: Register a new number**
+
+```bash
+sudo opencrow-signal-cli -a +12025550123 register
+sudo opencrow-signal-cli -a +12025550123 verify CODE
+```
+
+**Option B: Link to an existing Signal account**
+
+```bash
+sudo opencrow-signal-cli -a +12025550123 startLink
+# Scan the QR code / URI with your primary Signal device
+sudo opencrow-signal-cli -a +12025550123 finishLink
+```
+
+Once linked, set `OPENCROW_SIGNAL_ACCOUNT = "+12025550123"` and start the
+service. The account data persists in `OPENCROW_SIGNAL_CONFIG_DIR`.
+
 ## Secrets and authentication
 
 ### Nostr private key

@@ -41,6 +41,17 @@ let
         PI_CODING_AGENT_DIR=${cfg.environment.PI_CODING_AGENT_DIR} \
       ${lib.getExe cfg.piPackage} "$@"
   '';
+
+  # Host-side wrapper to run signal-cli inside the container as the opencrow user.
+  # Needed for account setup: register, verify, link, etc.
+  opencrowSignalCli = pkgs.writeShellScriptBin "opencrow-signal-cli" ''
+    exec machinectl shell opencrow@opencrow \
+      /run/current-system/sw/bin/env \
+        HOME=/var/lib/opencrow \
+      ${lib.getExe cfg.signalCliPackage} \
+        --config ${cfg.environment.OPENCROW_SIGNAL_CONFIG_DIR} \
+        "$@"
+  '';
 in
 {
   options.services.opencrow = {
@@ -419,8 +430,10 @@ in
       lib.mkDefault "/var/lib/opencrow/sediment"
     );
 
-    # Host-side wrapper for interactive pi usage inside the container.
-    environment.systemPackages = [ opencrowPi ];
+    # Host-side wrappers for interactive usage inside the container.
+    environment.systemPackages =
+      [ opencrowPi ]
+      ++ lib.optional (cfg.environment.OPENCROW_BACKEND == "signal") opencrowSignalCli;
 
     # Host-side directory needed for the bind mount into the container.
     systemd.tmpfiles.rules = [
