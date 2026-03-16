@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/pinpox/opencrow/backend"
@@ -476,18 +477,30 @@ func (b *Backend) stopDaemon() {
 	b.daemonDone = nil
 	b.daemonMu.Unlock()
 
-	if cmd == nil {
+	if cmd == nil || cmd.Process == nil {
 		return
 	}
 
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
+	// signal-cli handles SIGTERM gracefully (flushes state, closes DB).
+	// Give it time before escalating to SIGKILL.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+
+	if done != nil {
+		select {
+		case <-done:
+			return
+		case <-time.After(5 * time.Second):
+			slog.Warn("signal: daemon did not exit after SIGTERM, sending SIGKILL")
+		}
 	}
+
+	_ = cmd.Process.Kill()
 
 	if done != nil {
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
+			slog.Error("signal: daemon did not exit after SIGKILL")
 		}
 	}
 }
