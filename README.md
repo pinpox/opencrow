@@ -15,10 +15,11 @@ active conversation at a time; session data persists across restarts.
 OpenCrow supports multiple messaging backends:
 - **Matrix** — E2EE chat rooms via mautrix
 - **Nostr** — NIP-17 encrypted DMs via go-nostr
+- **Signal** — Signal chats via `signal-cli`
 
 ```mermaid
 graph LR
-    Transport[Matrix / Nostr] -->|message| Inbox[(Inbox)]
+    Transport[Matrix / Nostr / Signal] -->|message| Inbox[(Inbox)]
     Heartbeat -->|timer| Inbox
     Trigger["trigger.pipe"] -->|external| Inbox
     Inbox -->|dequeue| Worker -->|RPC| Pi["pi process"]

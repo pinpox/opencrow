@@ -59,6 +59,13 @@ in
       example = lib.literalExpression "llm-agents.packages.\${system}.pi";
     };
 
+    signalCliPackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.signal-cli;
+      defaultText = lib.literalExpression "pkgs.signal-cli";
+      description = "The signal-cli package to use when OPENCROW_BACKEND is signal.";
+    };
+
     skills = lib.mkOption {
       type = lib.types.attrsOf lib.types.path;
       default = {
@@ -184,6 +191,7 @@ in
             type = lib.types.enum [
               "matrix"
               "nostr"
+              "signal"
             ];
             default = "matrix";
             description = "Messaging backend to use.";
@@ -200,6 +208,32 @@ in
             type = lib.types.str;
             default = "";
             description = "Matrix device ID.";
+          };
+
+          OPENCROW_SIGNAL_ACCOUNT = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Signal account identifier for signal-cli. Required when backend is signal.";
+            example = "+12025550123";
+          };
+
+          OPENCROW_SIGNAL_CLI_BINARY = lib.mkOption {
+            type = lib.types.str;
+            default = lib.getExe cfg.signalCliPackage;
+            defaultText = lib.literalExpression "lib.getExe config.services.opencrow.signalCliPackage";
+            description = "Path to the signal-cli binary.";
+          };
+
+          OPENCROW_SIGNAL_CONFIG_DIR = lib.mkOption {
+            type = lib.types.str;
+            default = "/var/lib/opencrow/signal-cli";
+            description = "Directory where signal-cli stores account data and downloaded attachments.";
+          };
+
+          OPENCROW_SIGNAL_SOCKET_PATH = lib.mkOption {
+            type = lib.types.str;
+            default = "/var/lib/opencrow/signal-cli/opencrow-jsonrpc.sock";
+            description = "Unix socket path used by signal-cli daemon JSON-RPC.";
           };
 
           OPENCROW_NOSTR_RELAYS = lib.mkOption {
@@ -361,6 +395,11 @@ in
       }
       {
         assertion =
+          cfg.environment.OPENCROW_BACKEND != "signal" || cfg.environment.OPENCROW_SIGNAL_ACCOUNT != "";
+        message = "OPENCROW_SIGNAL_ACCOUNT is required when OPENCROW_BACKEND is signal.";
+      }
+      {
+        assertion =
           cfg.environment.OPENCROW_BACKEND != "nostr" || cfg.environment.OPENCROW_NOSTR_RELAYS != "";
         message = "OPENCROW_NOSTR_RELAYS is required when OPENCROW_BACKEND is nostr.";
       }
@@ -457,6 +496,7 @@ in
               pkgs.bash
               pkgs.coreutils
             ]
+            ++ lib.optional (cfg.environment.OPENCROW_BACKEND == "signal") cfg.signalCliPackage
             ++ cfg.extraPackages;
 
             environment = {
@@ -484,6 +524,7 @@ in
             opencrowPkg
             cfg.piPackage
           ]
+          ++ lib.optional (cfg.environment.OPENCROW_BACKEND == "signal") cfg.signalCliPackage
           ++ cfg.extraPackages;
         };
     };

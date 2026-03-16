@@ -31,6 +31,14 @@ func baseNostrEnv() map[string]string {
 	}
 }
 
+// baseSignalEnv returns the minimum env needed for a signal backend config.
+func baseSignalEnv() map[string]string {
+	return map[string]string{
+		"OPENCROW_BACKEND":        "signal",
+		"OPENCROW_SIGNAL_ACCOUNT": "+12025550123",
+	}
+}
+
 func TestBackendType_Default(t *testing.T) {
 	t.Parallel()
 
@@ -53,6 +61,42 @@ func TestBackendType_Unknown(t *testing.T) {
 	_, err := loadConfig(testEnv(env))
 	if err == nil {
 		t.Fatal("expected error for unknown backend, got nil")
+	}
+}
+
+func TestSignalConfig_Valid(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(testEnv(baseSignalEnv()))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	if cfg.BackendType != backendSignal {
+		t.Fatalf("BackendType = %q, want %q", cfg.BackendType, backendSignal)
+	}
+
+	if cfg.Signal.Account != "+12025550123" {
+		t.Fatalf("Signal.Account = %q, want +12025550123", cfg.Signal.Account)
+	}
+
+	if cfg.Signal.BinaryPath == "" {
+		t.Fatal("Signal.BinaryPath is empty")
+	}
+
+	if cfg.Signal.SocketPath == "" {
+		t.Fatal("Signal.SocketPath is empty")
+	}
+}
+
+func TestSignalConfig_MissingAccount(t *testing.T) {
+	t.Parallel()
+
+	env := map[string]string{"OPENCROW_BACKEND": "signal"}
+
+	_, err := loadConfig(testEnv(env))
+	if err == nil {
+		t.Fatal("expected error for missing signal account, got nil")
 	}
 }
 

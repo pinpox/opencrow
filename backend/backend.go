@@ -1,5 +1,5 @@
 // Package backend defines the messaging transport interface that all
-// backends (Matrix, Nostr, etc.) must implement.
+// backends (Matrix, Nostr, Signal, etc.) must implement.
 package backend
 
 import "context"

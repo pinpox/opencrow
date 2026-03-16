@@ -16,6 +16,7 @@ import (
 	"github.com/pinpox/opencrow/backend"
 	"github.com/pinpox/opencrow/matrix"
 	nostrbackend "github.com/pinpox/opencrow/nostr"
+	signalbackend "github.com/pinpox/opencrow/signal"
 	// Register the pure-Go SQLite driver.
 	_ "modernc.org/sqlite"
 )
@@ -201,6 +202,8 @@ func createBackend(ctx context.Context, cfg *Config, handler backend.MessageHand
 		return createMatrixBackend(cfg, handler, onRoomCleanup)
 	case backendNostr:
 		return createNostrBackend(ctx, cfg, handler)
+	case backendSignal:
+		return createSignalBackend(cfg, handler)
 	default:
 		return nil, fmt.Errorf("unsupported backend type: %q", cfg.BackendType)
 	}
@@ -259,6 +262,23 @@ func createNostrBackend(ctx context.Context, cfg *Config, handler backend.Messag
 	b, err := nostrbackend.NewBackend(ctx, nostrCfg, handler)
 	if err != nil {
 		return nil, fmt.Errorf("creating nostr backend: %w", err)
+	}
+
+	return b, nil
+}
+
+func createSignalBackend(cfg *Config, handler backend.MessageHandler) (*signalbackend.Backend, error) {
+	signalCfg := signalbackend.Config{
+		BinaryPath:   cfg.Signal.BinaryPath,
+		Account:      cfg.Signal.Account,
+		ConfigDir:    cfg.Signal.ConfigDir,
+		SocketPath:   cfg.Signal.SocketPath,
+		AllowedUsers: cfg.Signal.AllowedUsers,
+	}
+
+	b, err := signalbackend.New(signalCfg, handler)
+	if err != nil {
+		return nil, fmt.Errorf("creating signal backend: %w", err)
 	}
 
 	return b, nil
