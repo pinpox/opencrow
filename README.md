@@ -143,31 +143,18 @@ provider) in an environment file and pass it via the `environmentFiles` option.
 API keys don't expire and are the simplest approach.
 
 **Option B: OAuth (Claude Pro/Max)** — pi supports OAuth against your Anthropic
-account, so you can use your subscription instead of API credits. Anthropic's
-OAuth flow requires a browser redirect, so login must happen on a local machine
-— it cannot run inside the server container directly.
-
-**Important:** Do not copy your own `~/.pi/agent/auth.json` to the server.
-Concurrent token refreshes from two machines will invalidate each other's
-sessions, causing repeated logouts.
-
-Instead, create a fresh login session in an isolated HOME and upload the
-resulting `auth.json` to the server:
+account, so you can use your subscription instead of API credits. The NixOS
+module installs an `opencrow-pi` wrapper on the host that runs pi inside the
+container with the correct environment. To authenticate:
 
 ```bash
-# 1. Log in with a temporary HOME so you get a fresh, independent token
-tmpdir=$(mktemp -d)
-HOME=$tmpdir pi auth login
-
-# 2. Copy the auth.json to the server's PI_CODING_AGENT_DIR
-scp "$tmpdir/.pi/agent/auth.json" server:/var/lib/opencrow/pi-agent/auth.json
-
-# 3. Clean up
-rm -rf "$tmpdir"
+sudo opencrow-pi auth login
 ```
 
-The refresh token persists across restarts — you only need to do this once
-(unless the token gets revoked).
+Pi will print a URL — open it in any browser, complete the Anthropic login, and
+paste the redirect URL back into the terminal. No local browser is required on
+the server itself. The refresh token persists across restarts — you only need to
+do this once (unless the token gets revoked).
 
 ### Environment files
 
