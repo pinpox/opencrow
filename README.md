@@ -37,6 +37,162 @@ pi process, collects the response, and sends it back.
 > NixOS module does exactly that. Don't run it on a machine where you'd mind the
 > LLM running arbitrary commands.
 
+## Tutorial: NixOS deployment with Nostr
+
+This walkthrough sets up OpenCrow as a Nostr DM bot on NixOS using the included
+NixOS module. The module runs the bot inside a systemd-nspawn container for
+isolation.
+
+### 1. Add the flake inputs
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    opencrow.url = "github:pinpox/opencrow";
+    opencrow.inputs.nixpkgs.follows = "nixpkgs";
+
+    # pi coding agent
+    llm-agents.url = "github:numtide/llm-agents.nix";
+    llm-agents.inputs.nixpkgs.follows = "nixpkgs";
+  };
+}
+```
+
+### 2. Import the module and configure the bot
+
+```nix
+# configuration.nix
+{ self, pkgs, ... }:
+{
+  imports = [
+    self.inputs.opencrow.nixosModules.default
+  ];
+
+  services.opencrow = {
+    enable = true;
+    piPackage = self.inputs.llm-agents.packages.${pkgs.stdenv.hostPlatform.system}.pi;
+
+    environment = {
+      OPENCROW_BACKEND = "nostr";
+      OPENCROW_NOSTR_RELAYS = "wss://nos.lol,wss://relay.damus.io";
+      OPENCROW_NOSTR_DM_RELAYS = "wss://nos.lol,wss://relay.damus.io";
+      OPENCROW_NOSTR_BLOSSOM_SERVERS = "https://blossom.nostr.build";
+      OPENCROW_PI_PROVIDER = "anthropic";
+      OPENCROW_PI_MODEL = "claude-sonnet-4-6";
+
+      # Restrict access to your npub (optional, empty allows all)
+      OPENCROW_NOSTR_ALLOWED_USERS = "npub1...";
+
+      # Profile metadata (NIP-01 kind 0)
+      OPENCROW_NOSTR_NAME = "mybot";
+      OPENCROW_NOSTR_DISPLAY_NAME = "My Bot";
+      OPENCROW_NOSTR_ABOUT = "An AI assistant powered by OpenCrow";
+    };
+
+    # Extra packages available to the agent inside the container
+    extraPackages = with pkgs; [
+      curl jq ripgrep fd git python3 w3m
+    ];
+  };
+}
+```
+
+### 3. Provide secrets
+
+The bot needs a Nostr private key and LLM provider credentials. Pass secrets
+into the container using credential files and environment files — never put
+secrets in the Nix store.
+
+**Nostr private key** — generate one with [nak](https://github.com/fiatjaf/nak)
+and pass it via `credentialFiles`:
+
+```nix
+services.opencrow.credentialFiles."nostr-private-key" = /run/secrets/nostr-private-key;
+services.opencrow.environment.OPENCROW_NOSTR_PRIVATE_KEY_FILE = "%d/nostr-private-key";
+```
+
+**LLM API key** — put `ANTHROPIC_API_KEY=sk-...` in a file and pass it via
+`environmentFiles`:
+
+```nix
+services.opencrow.environmentFiles = [
+  /run/secrets/opencrow-env
+];
+```
+
+**Or use OAuth** — if you have a Claude Pro/Max subscription, authenticate
+interactively after deployment:
+
+```bash
+sudo opencrow-pi auth login
+```
+
+Pi prints a URL — open it in any browser, log in, and paste the redirect URL
+back into the terminal.
+
+### 4. Deploy and verify
+
+After deploying your NixOS configuration:
+
+```bash
+# Check the container is running
+machinectl list
+
+# Follow the bot logs
+journalctl -M opencrow -u opencrow -f
+
+# Interactive pi shell inside the container (requires root)
+sudo opencrow-pi
+```
+
+Send a DM to the bot's npub from any Nostr client. The bot should respond.
+
+### 5. Optional: add skills and extensions
+
+Skills teach the agent new capabilities. Extensions hook into the agent
+lifecycle:
+
+```nix
+services.opencrow = {
+  skills = {
+    # Built-in web browsing skill (included by default)
+    web = "${pkgs.opencrow}/share/opencrow/skills/web";
+    # Custom skill from a local directory
+    my-skill = ./skills/my-skill;
+  };
+
+  extensions = {
+    # Cross-session memory via semantic search
+    memory = true;
+  };
+};
+```
+
+### 6. Optional: customize the personality
+
+Create a `SOUL.md` file that defines the bot's personality and point to it:
+
+```nix
+services.opencrow.environment.OPENCROW_SOUL_FILE = "${./soul.md}";
+```
+
+```markdown
+# SOUL.md — Who You Are
+
+## Identity
+- **Name:** My Bot
+- **Vibe:** Helpful, concise, technically competent
+
+## Personality
+Be genuinely helpful. Prefer action over questions. Use the tools available
+to you — read files, run commands, search the web — before asking the user.
+
+## Available Tools
+Beyond the basics: curl, jq, ripgrep, fd, git, python3, w3m
+```
+
 ## Backend selection
 
 Set `OPENCROW_BACKEND` to choose the messaging backend. Defaults to `matrix`.
