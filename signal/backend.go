@@ -217,25 +217,13 @@ func (b *Backend) SendMessage(ctx context.Context, conversationID string, text s
 	}
 
 	timestamp, err := b.sendMessage(ctx, conversationID, text, replyToID)
-	if err == nil {
-		return timestamp
+	if err != nil {
+		slog.Error("signal: failed to send message", "conversation", conversationID, "error", err)
+
+		return ""
 	}
 
-	if replyToID != "" {
-		slog.Warn("signal: send with quote failed, retrying without quote",
-			"conversation", conversationID,
-			"error", err,
-		)
-
-		timestamp, err = b.sendMessage(ctx, conversationID, text, "")
-		if err == nil {
-			return timestamp
-		}
-	}
-
-	slog.Error("signal: failed to send message", "conversation", conversationID, "error", err)
-
-	return ""
+	return timestamp
 }
 
 // SendFile sends a file attachment via Signal.
