@@ -39,6 +39,7 @@ Send these as plain text messages in any conversation with the bot:
 | `OPENCROW_PI_SKILLS` | _(empty)_ | Comma-separated skill directory paths |
 | `OPENCROW_PI_SKILLS_DIR` | _(empty)_ | Directory containing skill subdirectories |
 | `OPENCROW_SHOW_TOOL_CALLS` | `false` | Show tool invocations (bash, read, edit, …) as messages in the chat |
+| `OPENCROW_DEBUG_TIMING` | `false` | Append task duration to each reply (useful for profiling local models) |
 
 ## File handling
 

@@ -72,6 +72,7 @@ type PiConfig struct {
 	SystemPrompt  string
 	Skills        []string
 	ShowToolCalls bool // OPENCROW_SHOW_TOOL_CALLS — relay tool_execution_start events to chat
+	DebugTiming   bool // OPENCROW_DEBUG_TIMING — append timing info to each reply
 }
 
 // LoadConfig reads configuration from os.Getenv.
@@ -128,6 +129,7 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 			SystemPrompt:  loadSoul(getenv),
 			Skills:        skills,
 			ShowToolCalls: parseBool(getenv("OPENCROW_SHOW_TOOL_CALLS")),
+			DebugTiming:   parseBool(getenv("OPENCROW_DEBUG_TIMING")),
 		},
 		Heartbeat: HeartbeatConfig{
 			Interval: heartbeatInterval,

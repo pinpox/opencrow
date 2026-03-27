@@ -338,6 +338,8 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) bool {
 	w.be.SetTyping(ctx, convID, true)
 	defer w.be.SetTyping(context.Background(), convID, false) //nolint:contextcheck // must clear typing even after preemption
 
+	taskStart := time.Now()
+
 	pi, reply, err := w.sendWithRetry(ctx, prompt)
 	if err != nil {
 		killPi := pi != nil
@@ -355,6 +357,10 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) bool {
 
 	if shouldSuppressReply(reply, item.Source) {
 		return false
+	}
+
+	if w.piCfg.DebugTiming {
+		reply += fmt.Sprintf("\n\n⏱ %s", time.Since(taskStart).Round(time.Millisecond))
 	}
 
 	w.app.sendReplyWithFiles(ctx, convID, reply, item.ReplyTo)
