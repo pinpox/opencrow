@@ -118,7 +118,7 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 			PickleKey:    env.or("OPENCROW_MATRIX_PICKLE_KEY", "opencrow-default-pickle-key"),
 			CryptoDBPath: env.or("OPENCROW_MATRIX_CRYPTO_DB", filepath.Join(workingDir, "crypto.db")),
 		},
-		Signal: loadSignalConfig(env, getenv, workingDir, allowedUsers),
+		Signal: loadSignalConfig(env, workingDir, allowedUsers),
 		Pi: PiConfig{
 			BinaryPath:    env.or("OPENCROW_PI_BINARY", "pi"),
 			SessionDir:    env.or("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
@@ -178,9 +178,9 @@ func (m MatrixConfig) validate() error {
 	return nil
 }
 
-func loadSignalConfig(env envReader, getenv func(string) string, workingDir string, allowedUsers map[string]struct{}) SignalConfig {
+func loadSignalConfig(env envReader, workingDir string, allowedUsers map[string]struct{}) SignalConfig {
 	return SignalConfig{
-		Account:      getenv("OPENCROW_SIGNAL_ACCOUNT"),
+		Account:      env.getenv("OPENCROW_SIGNAL_ACCOUNT"),
 		BinaryPath:   env.or("OPENCROW_SIGNAL_CLI_BINARY", "signal-cli"),
 		ConfigDir:    env.or("OPENCROW_SIGNAL_CONFIG_DIR", filepath.Join(workingDir, "signal-cli")),
 		SocketPath:   env.or("OPENCROW_SIGNAL_SOCKET_PATH", filepath.Join(workingDir, "signal-cli", "opencrow-jsonrpc.sock")),
