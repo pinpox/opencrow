@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -15,21 +14,7 @@ import (
 func openTestOutbox(t *testing.T) *outboxStore {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-
-	db, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db.ExecContext(context.Background(), dbSchema); err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-
-	t.Cleanup(func() { db.Close() })
-
-	return newOutboxStore(db)
+	return newOutboxStore(newTestDB(context.Background(), t))
 }
 
 func TestOutbox_PutAndGet(t *testing.T) {
@@ -150,20 +135,9 @@ func TestOutbox_GetCancelledContext(t *testing.T) {
 func TestOutbox_GetAfterClose(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-
-	db, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db.ExecContext(context.Background(), dbSchema); err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-
-	s := newOutboxStore(db)
 	ctx := context.Background()
+	db := newTestDBAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
+	s := newOutboxStore(db)
 
 	s.Put(ctx, "room1", "msg1", "hello")
 
@@ -182,29 +156,14 @@ func TestOutbox_Persistence(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	// First connection: write some messages.
-	db1, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db1.ExecContext(ctx, dbSchema); err != nil {
-		db1.Close()
-		t.Fatal(err)
-	}
-
+	db1 := newTestDBAt(ctx, t, dbPath)
 	s1 := newOutboxStore(db1)
 	s1.Put(ctx, "room1", "msg1", "hello")
 	s1.Put(ctx, "room1", "msg2", "world")
 	db1.Close()
 
 	// Second connection: reads from the same file.
-	db2, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db2.Close()
-
-	s2 := newOutboxStore(db2)
+	s2 := newOutboxStore(newTestDBAt(ctx, t, dbPath))
 
 	if got := s2.Get(ctx, "room1", "msg1"); got != "hello" {
 		t.Errorf("after reload, Get(room1, msg1) = %q, want %q", got, "hello")

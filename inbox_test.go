@@ -13,7 +13,16 @@ import (
 func newTestDB(ctx context.Context, t *testing.T) *sql.DB {
 	t.Helper()
 
-	db, err := sql.Open("sqlite", ":memory:"+sqliteDSNParams)
+	return newTestDBAt(ctx, t, ":memory:")
+}
+
+// newTestDBAt opens a SQLite DB at path (or ":memory:"), applies the schema
+// and registers cleanup. Shared by inbox, outbox and trigger-pipe tests so
+// the sql.Open + ExecContext(dbSchema) boilerplate lives in one place.
+func newTestDBAt(ctx context.Context, t *testing.T, path string) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", path+sqliteDSNParams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,42 +198,15 @@ func TestInbox_Persistence(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dir := t.TempDir()
-	dbPath := dir + "/test.db" + sqliteDSNParams
+	dbPath := t.TempDir() + "/test.db"
 
-	db1, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db1.ExecContext(ctx, dbSchema); err != nil {
-		db1.Close()
-		t.Fatal(err)
-	}
-
-	inbox1, err := NewInboxStore(ctx, db1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	db1 := newTestDBAt(ctx, t, dbPath)
+	inbox1 := newTestInboxWithDB(ctx, t, db1)
 
 	must(t, inbox1.Enqueue(ctx, PriorityTrigger, sourceTrigger, "survived crash", ""))
 	db1.Close()
 
-	db2, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer db2.Close()
-
-	if _, err := db2.ExecContext(ctx, dbSchema); err != nil {
-		t.Fatal(err)
-	}
-
-	inbox2, err := NewInboxStore(ctx, db2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	inbox2 := newTestInboxWithDB(ctx, t, newTestDBAt(ctx, t, dbPath))
 
 	count, err := inbox2.Count(ctx)
 	must(t, err)

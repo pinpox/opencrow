@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"testing"
 	"time"
@@ -14,24 +13,8 @@ func TestTriggerPipeReader_EnqueuesLines(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-
-	dbPath := t.TempDir() + "/test.db"
-
-	db, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer db.Close()
-
-	if _, err := db.ExecContext(ctx, dbSchema); err != nil {
-		t.Fatal(err)
-	}
-
-	inbox, err := NewInboxStore(ctx, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := newTestDBAt(ctx, t, t.TempDir()+"/test.db")
+	inbox := newTestInboxWithDB(ctx, t, db)
 
 	dir := t.TempDir()
 
