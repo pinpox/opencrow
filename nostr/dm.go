@@ -12,36 +12,16 @@ import (
 )
 
 func (b *Backend) sendDM(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Pool, recipientPK gonostr.PubKey, text string, extraTags gonostr.Tags) string {
-	rumor, err := b.buildDMRumor(ctx, kr, recipientPK, text, extraTags)
+	rumor, err := buildRumor(ctx, kr, gonostr.KindDirectMessage, text, recipientPK, extraTags)
 	if err != nil {
 		slog.Error("nostr: failed to build DM rumor", "recipient", recipientPK.Hex(), "error", err)
 
 		return ""
 	}
 
-	toUs, err := nip59.GiftWrap(rumor, rumor.PubKey,
-		func(s string) (string, error) { return kr.Encrypt(ctx, s, rumor.PubKey) },
-		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
-		nil,
-	)
-	if err != nil {
-		slog.Error("nostr: failed to gift-wrap DM (toUs)", "recipient", recipientPK.Hex(), "error", err)
-
+	if !b.wrapAndPublish(ctx, kr, pool, rumor, recipientPK, "DM") {
 		return ""
 	}
-
-	toThem, err := nip59.GiftWrap(rumor, recipientPK,
-		func(s string) (string, error) { return kr.Encrypt(ctx, s, recipientPK) },
-		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
-		nil,
-	)
-	if err != nil {
-		slog.Error("nostr: failed to gift-wrap DM (toThem)", "recipient", recipientPK.Hex(), "error", err)
-
-		return ""
-	}
-
-	b.publishDMGiftWraps(ctx, pool, toUs, toThem, recipientPK)
 
 	return rumor.ID.Hex()
 }
@@ -49,82 +29,71 @@ func (b *Backend) sendDM(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Po
 // sendFileMessage sends a NIP-17 kind 15 file message. The URL is the rumor
 // content and extraTags carry file metadata (mime type, encryption params).
 func (b *Backend) sendFileMessage(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Pool, recipientPK gonostr.PubKey, fileURL string, extraTags gonostr.Tags) {
-	rumor, err := b.buildFileRumor(ctx, kr, recipientPK, fileURL, extraTags)
+	rumor, err := buildRumor(ctx, kr, KindFileMessage, fileURL, recipientPK, extraTags)
 	if err != nil {
 		slog.Error("nostr: failed to build file rumor", "recipient", recipientPK.Hex(), "error", err)
 
 		return
 	}
 
-	toUs, err := nip59.GiftWrap(rumor, rumor.PubKey,
-		func(s string) (string, error) { return kr.Encrypt(ctx, s, rumor.PubKey) },
-		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
-		nil,
-	)
-	if err != nil {
-		slog.Error("nostr: failed to gift-wrap file msg (toUs)", "recipient", recipientPK.Hex(), "error", err)
+	b.wrapAndPublish(ctx, kr, pool, rumor, recipientPK, "file msg")
+}
 
-		return
+// buildRumor constructs an unsigned rumor event of the given kind with a
+// "p" tag for the recipient plus any extra tags, and computes its ID.
+func buildRumor(ctx context.Context, kr gonostr.Keyer, kind gonostr.Kind, content string, recipientPK gonostr.PubKey, extraTags gonostr.Tags) (gonostr.Event, error) {
+	ourPubkey, err := kr.GetPublicKey(ctx)
+	if err != nil {
+		return gonostr.Event{}, fmt.Errorf("getting public key: %w", err)
 	}
 
-	toThem, err := nip59.GiftWrap(rumor, recipientPK,
-		func(s string) (string, error) { return kr.Encrypt(ctx, s, recipientPK) },
-		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
-		nil,
-	)
-	if err != nil {
-		slog.Error("nostr: failed to gift-wrap file msg (toThem)", "recipient", recipientPK.Hex(), "error", err)
+	tags := make(gonostr.Tags, 0, len(extraTags)+1)
+	tags = append(tags, gonostr.Tag{"p", recipientPK.Hex()})
+	tags = append(tags, extraTags...)
 
-		return
+	rumor := gonostr.Event{
+		Kind:      kind,
+		Content:   content,
+		Tags:      tags,
+		CreatedAt: gonostr.Now(),
+		PubKey:    ourPubkey,
+	}
+	rumor.ID = rumor.GetID()
+
+	return rumor, nil
+}
+
+// wrapAndPublish gift-wraps the rumor twice (for us and the recipient)
+// and enqueues both copies to the appropriate relays. Returns false if
+// either wrap step failed.
+func (b *Backend) wrapAndPublish(ctx context.Context, kr gonostr.Keyer, pool *gonostr.Pool, rumor gonostr.Event, recipientPK gonostr.PubKey, label string) bool {
+	toUs, err := giftWrap(ctx, kr, rumor, rumor.PubKey)
+	if err != nil {
+		slog.Error("nostr: failed to gift-wrap "+label+" (toUs)", "recipient", recipientPK.Hex(), "error", err)
+
+		return false
+	}
+
+	toThem, err := giftWrap(ctx, kr, rumor, recipientPK)
+	if err != nil {
+		slog.Error("nostr: failed to gift-wrap "+label+" (toThem)", "recipient", recipientPK.Hex(), "error", err)
+
+		return false
 	}
 
 	b.publishDMGiftWraps(ctx, pool, toUs, toThem, recipientPK)
+
+	return true
 }
 
-// buildFileRumor constructs a kind 15 rumor event for a file message.
-func (b *Backend) buildFileRumor(ctx context.Context, kr gonostr.Keyer, recipientPK gonostr.PubKey, fileURL string, extraTags gonostr.Tags) (gonostr.Event, error) {
-	ourPubkey, err := kr.GetPublicKey(ctx)
-	if err != nil {
-		return gonostr.Event{}, fmt.Errorf("getting public key: %w", err)
-	}
-
-	tags := make(gonostr.Tags, 0, len(extraTags)+1)
-	tags = append(tags, gonostr.Tag{"p", recipientPK.Hex()})
-	tags = append(tags, extraTags...)
-
-	rumor := gonostr.Event{
-		Kind:      KindFileMessage,
-		Content:   fileURL,
-		Tags:      tags,
-		CreatedAt: gonostr.Now(),
-		PubKey:    ourPubkey,
-	}
-	rumor.ID = rumor.GetID()
-
-	return rumor, nil
-}
-
-// buildDMRumor constructs and returns a kind 14 rumor event for a DM.
-func (b *Backend) buildDMRumor(ctx context.Context, kr gonostr.Keyer, recipientPK gonostr.PubKey, text string, extraTags gonostr.Tags) (gonostr.Event, error) {
-	ourPubkey, err := kr.GetPublicKey(ctx)
-	if err != nil {
-		return gonostr.Event{}, fmt.Errorf("getting public key: %w", err)
-	}
-
-	tags := make(gonostr.Tags, 0, len(extraTags)+1)
-	tags = append(tags, extraTags...)
-	tags = append(tags, gonostr.Tag{"p", recipientPK.Hex()})
-
-	rumor := gonostr.Event{
-		Kind:      gonostr.KindDirectMessage,
-		Content:   text,
-		Tags:      tags,
-		CreatedAt: gonostr.Now(),
-		PubKey:    ourPubkey,
-	}
-	rumor.ID = rumor.GetID()
-
-	return rumor, nil
+// giftWrap wraps a rumor for target using kr's encrypt/sign callbacks.
+// Factors out the closure boilerplate every nip59.GiftWrap call repeats.
+func giftWrap(ctx context.Context, kr gonostr.Keyer, rumor gonostr.Event, target gonostr.PubKey) (gonostr.Event, error) {
+	return nip59.GiftWrap(rumor, target,
+		func(s string) (string, error) { return kr.Encrypt(ctx, s, target) },
+		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
+		nil,
+	)
 }
 
 // publishDMGiftWraps publishes the two gift-wrap copies to the appropriate relays.
@@ -156,14 +125,7 @@ func (b *Backend) sendReaction(ctx context.Context, rumorID gonostr.ID, recipien
 	}
 	rumor.ID = rumor.GetID()
 
-	// Gift-wrap to recipient.
-	toThem, err := nip59.GiftWrap(
-		rumor,
-		recipientPK,
-		func(s string) (string, error) { return b.kr.Encrypt(ctx, s, recipientPK) },
-		func(e *gonostr.Event) error { return b.kr.SignEvent(ctx, e) },
-		nil,
-	)
+	toThem, err := giftWrap(ctx, b.kr, rumor, recipientPK)
 	if err != nil {
 		slog.Warn("nostr: failed to gift-wrap reaction", "recipient", recipientPK.Hex(), "error", err)
 
