@@ -23,7 +23,10 @@ let
       stateDir = stateDirOf name;
 
       skillsDir = pkgs.linkFarm "opencrow-skills-${name}" (
-        lib.mapAttrsToList (sname: path: { name = sname; inherit path; }) config.skills
+        lib.mapAttrsToList (sname: path: {
+          name = sname;
+          inherit path;
+        }) config.skills
       );
     in
     {
@@ -69,9 +72,7 @@ let
       };
 
       extensions = lib.mkOption {
-        type = lib.types.attrsOf (
-          lib.types.either lib.types.bool lib.types.path
-        );
+        type = lib.types.attrsOf (lib.types.either lib.types.bool lib.types.path);
         default = { };
         description = ''
           Pi extension files or directories to make available, keyed by
@@ -377,15 +378,15 @@ let
     {
       options = {
         enable = lib.mkEnableOption "OpenCrow messaging bot instance '${name}'";
-      } // mkInstanceOptions { inherit name config; };
+      }
+      // mkInstanceOptions { inherit name config; };
     };
 
   # Build the effective set of all enabled instances: the top-level "default"
   # instance (when services.opencrow.enable is set) merged with all named
   # instances from services.opencrow.instances.
   effectiveInstances =
-    (lib.optionalAttrs cfg.enable { default = cfg; })
-    // lib.filterAttrs (_: i: i.enable) cfg.instances;
+    (lib.optionalAttrs cfg.enable { default = cfg; }) // lib.filterAttrs (_: i: i.enable) cfg.instances;
 
   mkInstanceConfig =
     name: icfg:
@@ -399,10 +400,7 @@ let
       # extension package from the opencrow flake, a path is used as-is.
       resolvedExtensions = lib.mapAttrs (
         ename: value:
-        if value == true then
-          self.packages.${pkgs.hostPlatform.system}."extension-${ename}"
-        else
-          value
+        if value == true then self.packages.${pkgs.hostPlatform.system}."extension-${ename}" else value
       ) (lib.filterAttrs (_: v: v != false) icfg.extensions);
 
       # Generate a settings.json for pi that lists declared extensions.
@@ -436,20 +434,17 @@ let
       assertions = [
         {
           assertion =
-            icfg.environment.OPENCROW_BACKEND != "matrix"
-            || icfg.environment.OPENCROW_MATRIX_HOMESERVER != "";
+            icfg.environment.OPENCROW_BACKEND != "matrix" || icfg.environment.OPENCROW_MATRIX_HOMESERVER != "";
           message = "services.opencrow (${name}): OPENCROW_MATRIX_HOMESERVER is required when OPENCROW_BACKEND is matrix.";
         }
         {
           assertion =
-            icfg.environment.OPENCROW_BACKEND != "signal"
-            || icfg.environment.OPENCROW_SIGNAL_ACCOUNT != "";
+            icfg.environment.OPENCROW_BACKEND != "signal" || icfg.environment.OPENCROW_SIGNAL_ACCOUNT != "";
           message = "services.opencrow (${name}): OPENCROW_SIGNAL_ACCOUNT is required when OPENCROW_BACKEND is signal.";
         }
         {
           assertion =
-            icfg.environment.OPENCROW_BACKEND != "nostr"
-            || icfg.environment.OPENCROW_NOSTR_RELAYS != "";
+            icfg.environment.OPENCROW_BACKEND != "nostr" || icfg.environment.OPENCROW_NOSTR_RELAYS != "";
           message = "services.opencrow (${name}): OPENCROW_NOSTR_RELAYS is required when OPENCROW_BACKEND is nostr.";
         }
         {
@@ -463,9 +458,10 @@ let
         }
       ];
 
-      systemPackages =
-        [ opencrowPi ]
-        ++ lib.optional (icfg.environment.OPENCROW_BACKEND == "signal") opencrowSignalCli;
+      systemPackages = [
+        opencrowPi
+      ]
+      ++ lib.optional (icfg.environment.OPENCROW_BACKEND == "signal") opencrowSignalCli;
 
       # The opencrow user only exists inside the container, not on the host,
       # so we cannot reference it in host-side tmpfiles rules (systemd-tmpfiles
@@ -609,7 +605,11 @@ in
               }
             '';
           };
-        } // mkInstanceOptions { name = "default"; inherit config; };
+        }
+        // mkInstanceOptions {
+          name = "default";
+          inherit config;
+        };
       }
     );
     default = { };
@@ -620,35 +620,38 @@ in
     '';
   };
 
-  config = lib.mkIf (instanceConfigs != { }) (lib.mkMerge [
-    # Aggregate host-level config from all instances.
-    {
-      assertions = [
-        {
-          assertion = !(cfg.instances ? "default");
-          message = "services.opencrow: the instance name 'default' is reserved for the top-level configuration. Use a different name or configure via services.opencrow.enable with top-level options.";
-        }
-      ] ++ lib.concatLists (lib.mapAttrsToList (_: ic: ic.assertions) instanceConfigs);
+  config = lib.mkIf (instanceConfigs != { }) (
+    lib.mkMerge [
+      # Aggregate host-level config from all instances.
+      {
+        assertions = [
+          {
+            assertion = !(cfg.instances ? "default");
+            message = "services.opencrow: the instance name 'default' is reserved for the top-level configuration. Use a different name or configure via services.opencrow.enable with top-level options.";
+          }
+        ]
+        ++ lib.concatLists (lib.mapAttrsToList (_: ic: ic.assertions) instanceConfigs);
 
-      environment.systemPackages = lib.concatLists (
-        lib.mapAttrsToList (_: ic: ic.systemPackages) instanceConfigs
-      );
+        environment.systemPackages = lib.concatLists (
+          lib.mapAttrsToList (_: ic: ic.systemPackages) instanceConfigs
+        );
 
-      systemd.tmpfiles.rules = lib.concatLists (
-        lib.mapAttrsToList (_: ic: ic.tmpfilesRules) instanceConfigs
-      );
+        systemd.tmpfiles.rules = lib.concatLists (
+          lib.mapAttrsToList (_: ic: ic.tmpfilesRules) instanceConfigs
+        );
 
-      # Work around stale machined registration after unclean shutdown.
-      systemd.services = lib.mapAttrs' (
-        name: ic:
-        lib.nameValuePair "container@${containerNameOf name}" {
-          preStart = lib.mkBefore ic.containerPreStart;
-        }
-      ) instanceConfigs;
+        # Work around stale machined registration after unclean shutdown.
+        systemd.services = lib.mapAttrs' (
+          name: ic:
+          lib.nameValuePair "container@${containerNameOf name}" {
+            preStart = lib.mkBefore ic.containerPreStart;
+          }
+        ) instanceConfigs;
 
-      containers = lib.mapAttrs' (
-        name: ic: lib.nameValuePair (containerNameOf name) ic.container
-      ) instanceConfigs;
-    }
-  ]);
+        containers = lib.mapAttrs' (
+          name: ic: lib.nameValuePair (containerNameOf name) ic.container
+        ) instanceConfigs;
+      }
+    ]
+  );
 }

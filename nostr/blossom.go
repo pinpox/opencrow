@@ -27,10 +27,10 @@ import (
 
 // blossomUpload holds the result of an encrypted file upload to Blossom.
 type blossomUpload struct {
-	URL          string         // Blossom URL of the ciphertext blob
-	MIMEType     string         // MIME type of the original plaintext file
-	XHex         string         // SHA-256 of the ciphertext (NIP-17 "x" tag)
-	Enc          *encryptedFile // encryption parameters for the recipient
+	URL      string         // Blossom URL of the ciphertext blob
+	MIMEType string         // MIME type of the original plaintext file
+	XHex     string         // SHA-256 of the ciphertext (NIP-17 "x" tag)
+	Enc      *encryptedFile // encryption parameters for the recipient
 }
 
 // uploadToBlossomImpl encrypts a file with AES-256-GCM and uploads the
