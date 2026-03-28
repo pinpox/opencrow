@@ -38,8 +38,7 @@ type Backend struct {
 
 	active backend.ActiveConversation
 
-	cancelMu sync.Mutex
-	cancelFn context.CancelFunc
+	cancel backend.Canceler
 
 	rpcMu sync.RWMutex
 	rpc   *jsonRPCClient
@@ -94,15 +93,8 @@ func (b *Backend) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	b.cancelMu.Lock()
-	b.cancelFn = cancel
-	b.cancelMu.Unlock()
-
-	defer func() {
-		b.cancelMu.Lock()
-		b.cancelFn = nil
-		b.cancelMu.Unlock()
-	}()
+	b.cancel.Set(cancel)
+	defer b.cancel.Set(nil)
 
 	if err := b.startDaemon(runCtx); err != nil {
 		return err
@@ -188,11 +180,7 @@ func (b *Backend) Run(ctx context.Context) error {
 
 // Stop signals the Signal receive loop to stop.
 func (b *Backend) Stop() {
-	b.cancelMu.Lock()
-	if b.cancelFn != nil {
-		b.cancelFn()
-	}
-	b.cancelMu.Unlock()
+	b.cancel.Cancel()
 }
 
 // Close releases JSON-RPC and daemon resources.
