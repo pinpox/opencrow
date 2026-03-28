@@ -58,8 +58,7 @@ type Backend struct {
 	handler backend.MessageHandler
 	db      *DB
 
-	cancelMu sync.Mutex
-	cancelFn context.CancelFunc
+	cancel backend.Canceler
 
 	// Single active conversation tracking
 	active backend.ActiveConversation
@@ -143,9 +142,7 @@ func (b *Backend) Run(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 
-	b.cancelMu.Lock()
-	b.cancelFn = cancel
-	b.cancelMu.Unlock()
+	b.cancel.Set(cancel)
 
 	events := b.pool.SubscribeMany(ctx, subRelays, gonostr.Filter{
 		Kinds: []gonostr.Kind{gonostr.KindGiftWrap},
@@ -182,11 +179,7 @@ func (b *Backend) Run(ctx context.Context) error {
 
 // Stop signals the backend to shut down.
 func (b *Backend) Stop() {
-	b.cancelMu.Lock()
-	if b.cancelFn != nil {
-		b.cancelFn()
-	}
-	b.cancelMu.Unlock()
+	b.cancel.Cancel()
 }
 
 // Close releases relay connections and the database.

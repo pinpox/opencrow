@@ -54,6 +54,33 @@ func AttachmentText(caption, path string) string {
 	return fmt.Sprintf("[User sent a file (%s): %s]\nUse the read tool to view it.", caption, path)
 }
 
+// Canceler stores a context.CancelFunc behind a mutex so Run can install
+// it and Stop can fire it from another goroutine. Backends that implement
+// Stop by cancelling Run's context embed this instead of each carrying
+// their own mutex/func pair.
+type Canceler struct {
+	mu sync.Mutex
+	fn func()
+}
+
+// Set installs fn as the cancel function.
+func (c *Canceler) Set(fn func()) {
+	c.mu.Lock()
+	c.fn = fn
+	c.mu.Unlock()
+}
+
+// Cancel invokes the stored function if present.
+func (c *Canceler) Cancel() {
+	c.mu.Lock()
+	fn := c.fn
+	c.mu.Unlock()
+
+	if fn != nil {
+		fn()
+	}
+}
+
 // IsAllowed reports whether senderID is permitted by the allowlist.
 // An empty or nil allowlist permits all senders.
 func IsAllowed(allowlist map[string]struct{}, senderID string) bool {
