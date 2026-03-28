@@ -194,51 +194,51 @@ func (a *App) sendReplyWithFiles(ctx context.Context, conversationID, reply, rep
 // fenced code blocks / inline backticks (and whether fences carry a language
 // hint) so backends that do not render Markdown do not leak raw syntax.
 func formatToolCall(evt ToolCallEvent, flavor backend.MarkdownFlavor) string {
-	code := func(s string) string {
-		if flavor == backend.MarkdownNone {
-			return s
-		}
-
-		return "`" + s + "`"
-	}
-
 	switch evt.ToolName {
 	case "bash":
-		if cmd, ok := evt.Args["command"].(string); ok {
-			switch flavor {
-			case backend.MarkdownFull:
-				return fmt.Sprintf("🔧\n```sh\n%s\n```", cmd)
-			case backend.MarkdownBasic:
-				// No language hint: some clients (e.g. Nostr/0xchat)
-				// render the hint literally instead of hiding it.
-				return fmt.Sprintf("🔧\n```\n%s\n```", cmd)
-			default:
-				return "🔧 " + cmd
-			}
-		}
-
-		return "🔧 bash"
+		return formatBashCall(evt, flavor)
 	case "read":
-		if p, ok := evt.Args["path"].(string); ok {
-			return "📄 reading " + code(p)
-		}
-
-		return "📄 reading file"
+		return formatPathCall(evt, flavor, "📄 reading", "file")
 	case "edit":
-		if p, ok := evt.Args["path"].(string); ok {
-			return "✏️ editing " + code(p)
-		}
-
-		return "✏️ editing file"
+		return formatPathCall(evt, flavor, "✏️ editing", "file")
 	case "write":
-		if p, ok := evt.Args["path"].(string); ok {
-			return "📝 writing " + code(p)
-		}
-
-		return "📝 writing file"
+		return formatPathCall(evt, flavor, "📝 writing", "file")
 	default:
 		return "🔧 " + evt.ToolName
 	}
+}
+
+func formatBashCall(evt ToolCallEvent, flavor backend.MarkdownFlavor) string {
+	cmd, ok := evt.Args["command"].(string)
+	if !ok {
+		return "🔧 bash"
+	}
+
+	switch flavor {
+	case backend.MarkdownFull:
+		return fmt.Sprintf("🔧\n```sh\n%s\n```", cmd)
+	case backend.MarkdownBasic:
+		// No language hint: some clients (e.g. Nostr/0xchat)
+		// render the hint literally instead of hiding it.
+		return fmt.Sprintf("🔧\n```\n%s\n```", cmd)
+	case backend.MarkdownNone:
+		return "🔧 " + cmd
+	default:
+		return "🔧 " + cmd
+	}
+}
+
+func formatPathCall(evt ToolCallEvent, flavor backend.MarkdownFlavor, prefix, fallback string) string {
+	p, ok := evt.Args["path"].(string)
+	if !ok {
+		return prefix + " " + fallback
+	}
+
+	if flavor == backend.MarkdownNone {
+		return prefix + " " + p
+	}
+
+	return prefix + " `" + p + "`"
 }
 
 // systemPrompt returns the full system prompt including backend-specific extras.
