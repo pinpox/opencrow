@@ -612,18 +612,16 @@ func (q *publishQueue) gcBreakersLocked() {
 
 	now := time.Now()
 
-	for r, b := range q.breakers {
+	maps.DeleteFunc(q.breakers, func(r string, b *relayBreaker) bool {
 		if _, ok := wanted[r]; ok {
-			continue
+			return false
 		}
 		// Unreferenced. Drop closed breakers immediately; drop open ones
 		// only once their nextProbe has long passed — retaining them lets
 		// a fresh enqueue to a known-dead relay inherit the cooldown, but
 		// we don't want to leak them forever if the relay is gone for good.
-		if b.state == closed || now.Sub(b.nextProbe) > breakerMaxCooldown {
-			delete(q.breakers, r)
-		}
-	}
+		return b.state == closed || now.Sub(b.nextProbe) > breakerMaxCooldown
+	})
 }
 
 // probeLevel returns Debug for half-open probes (expected to fail often)
