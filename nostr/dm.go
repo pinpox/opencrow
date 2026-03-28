@@ -81,7 +81,7 @@ func (b *Backend) wrapAndPublish(ctx context.Context, kr gonostr.Keyer, pool *go
 		return false
 	}
 
-	b.publishDMGiftWraps(ctx, pool, toUs, toThem, recipientPK)
+	b.publishGiftWraps(ctx, pool, toUs, toThem, recipientPK, label)
 
 	return true
 }
@@ -101,16 +101,19 @@ func giftWrap(ctx context.Context, kr gonostr.Keyer, rumor gonostr.Event, target
 	return evt, nil
 }
 
-// publishDMGiftWraps publishes the two gift-wrap copies to the appropriate relays.
-func (b *Backend) publishDMGiftWraps(ctx context.Context, pool *gonostr.Pool, toUs, toThem gonostr.Event, recipientPK gonostr.PubKey) {
+// publishGiftWraps publishes the two gift-wrap copies to the appropriate
+// relays. label describes what is being sent ("DM", "file message", ...)
+// and feeds queue labels/debug logging so non-DM payloads are not
+// mislabelled.
+func (b *Backend) publishGiftWraps(ctx context.Context, pool *gonostr.Pool, toUs, toThem gonostr.Event, recipientPK gonostr.PubKey, label string) {
 	// Publish our copy to our DM relays.
-	b.pubQueue.enqueue(ctx, toUs, b.cfg.DMRelays, "DM toUs")
+	b.pubQueue.enqueue(ctx, toUs, b.cfg.DMRelays, label+" toUs")
 
 	theirRelays := b.recipientRelays(ctx, recipientPK, pool)
 
-	slog.Debug("nostr: sending DM", "recipient", recipientPK.Hex(), "their_relays", theirRelays)
+	slog.Debug("nostr: sending "+label, "recipient", recipientPK.Hex(), "their_relays", theirRelays)
 
-	b.pubQueue.enqueue(ctx, toThem, theirRelays, "DM toThem")
+	b.pubQueue.enqueue(ctx, toThem, theirRelays, label+" toThem")
 }
 
 // sendReaction sends a NIP-25 kind 7 reaction gift-wrapped via NIP-59 to

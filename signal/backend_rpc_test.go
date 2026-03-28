@@ -350,6 +350,7 @@ done
 // drive and assert. This collapses the ~15 lines of identical setup
 // that every TestRun_* function was repeating.
 type runTestSetup struct {
+	t      *testing.T
 	fake   *fakeSignalDaemon
 	mc     *messageCollector
 	b      *Backend
@@ -374,14 +375,19 @@ func newRunTest(t *testing.T, allowedUsers map[string]struct{}) *runTestSetup {
 
 	time.Sleep(100 * time.Millisecond)
 
-	return &runTestSetup{fake: fake, mc: mc, b: b, cancel: cancel, done: done}
+	return &runTestSetup{t: t, fake: fake, mc: mc, b: b, cancel: cancel, done: done}
 }
 
-// stop cancels the run and waits for the loop to exit, then returns
-// all collected messages.
+// stop cancels the run, waits for the loop to exit, fails the test if
+// the receive loop returned an error, and returns all collected messages.
 func (s *runTestSetup) stop() []backend.Message {
+	s.t.Helper()
+
 	s.cancel()
-	<-s.done
+
+	if err := <-s.done; err != nil {
+		s.t.Fatalf("runReceiveLoop: %v", err)
+	}
 
 	return s.mc.get()
 }

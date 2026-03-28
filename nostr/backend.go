@@ -141,6 +141,9 @@ func (b *Backend) Run(ctx context.Context) error {
 	slog.Info("nostr: subscribing to DMs", "pubkey", b.keys.PK.Hex(), "since", since, "relays", subRelays)
 
 	ctx, cancel := context.WithCancel(ctx)
+	// Ensure pruneSeenLoop stops even if the events channel closes
+	// without Stop() being called.
+	defer cancel()
 
 	b.cancel.Set(cancel)
 

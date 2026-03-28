@@ -2,6 +2,7 @@ package backend
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -17,6 +18,10 @@ type ActiveConversation struct {
 // conversation is active yet or if id is already the active one. Returns
 // false when a different conversation is already claimed.
 func (a *ActiveConversation) Claim(id string) bool {
+	if id == "" {
+		return false
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -43,6 +48,11 @@ func (a *ActiveConversation) Reset(id string) {
 // caption may be empty; path may be empty if the file could not be
 // resolved to a local filesystem location.
 func AttachmentText(caption, path string) string {
+	// Collapse newlines so the marker stays on a single line even when
+	// a remote caption/filename contains CR/LF.
+	caption = sanitizeLine(caption)
+	path = sanitizeLine(path)
+
 	if caption == "" {
 		caption = "no caption"
 	}
@@ -52,6 +62,12 @@ func AttachmentText(caption, path string) string {
 	}
 
 	return fmt.Sprintf("[User sent a file (%s): %s]\nUse the read tool to view it.", caption, path)
+}
+
+// sanitizeLine replaces CR/LF with spaces so multi-line remote input
+// cannot break single-line markers.
+func sanitizeLine(s string) string {
+	return strings.TrimSpace(strings.NewReplacer("\r", " ", "\n", " ").Replace(s))
 }
 
 // Canceler stores a context.CancelFunc behind a mutex so Run can install
