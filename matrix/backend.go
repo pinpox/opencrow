@@ -537,11 +537,8 @@ func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
 	}
 
 	var replyToID string
-
 	if msg.RelatesTo != nil {
-		if replyTo := msg.RelatesTo.GetReplyTo(); replyTo != "" {
-			replyToID = string(replyTo)
-		}
+		replyToID = string(msg.RelatesTo.GetReplyTo())
 	}
 
 	b.handler(ctx, backend.Message{
