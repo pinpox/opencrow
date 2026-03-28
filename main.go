@@ -106,11 +106,19 @@ func run() int {
 	return 0
 }
 
+// sqliteDSNParams are the connection parameters for modernc.org/sqlite.
+// Note: modernc uses _pragma=name(value), not the mattn/go-sqlite3
+// shorthand _name=value — the latter is silently ignored, leaving
+// busy_timeout=0 and journal_mode=delete, which causes SQLITE_BUSY
+// on concurrent writes. _txlock=immediate prevents deferred-lock
+// upgrade deadlocks when two writers overlap under WAL.
+const sqliteDSNParams = "?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+
 // openDB opens the shared database for inbox and outbox tables.
 func openDB(ctx context.Context, sessionDir string) (*sql.DB, error) {
 	dbPath := filepath.Join(sessionDir, opencrowDBFile)
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}

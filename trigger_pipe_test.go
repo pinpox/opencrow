@@ -17,7 +17,7 @@ func TestTriggerPipeReader_EnqueuesLines(t *testing.T) {
 
 	dbPath := t.TempDir() + "/test.db"
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
 	if err != nil {
 		t.Fatal(err)
 	}

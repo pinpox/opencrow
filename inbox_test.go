@@ -13,7 +13,7 @@ import (
 func newTestDB(ctx context.Context, t *testing.T) *sql.DB {
 	t.Helper()
 
-	db, err := sql.Open("sqlite", ":memory:?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", ":memory:"+sqliteDSNParams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestInbox_Persistence(t *testing.T) {
 
 	ctx := context.Background()
 	dir := t.TempDir()
-	dbPath := dir + "/test.db?_journal_mode=WAL&_busy_timeout=5000"
+	dbPath := dir + "/test.db" + sqliteDSNParams
 
 	db1, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -315,6 +315,36 @@ func TestInbox_DequeueUserBatch_Empty(t *testing.T) {
 
 	if len(items) != 0 {
 		t.Fatalf("got %d items, want 0", len(items))
+	}
+}
+
+// TestOpenDB_Pragmas guards against regressing to mattn/go-sqlite3
+// DSN syntax (_journal_mode=WAL), which modernc.org/sqlite silently
+// ignores, leaving busy_timeout=0 and causing SQLITE_BUSY under
+// concurrent writes (observed: fifo enqueue racing user messages).
+func TestOpenDB_Pragmas(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	db, err := openDB(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var jm string
+	must(t, db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&jm))
+
+	if jm != "wal" {
+		t.Errorf("journal_mode = %q, want wal", jm)
+	}
+
+	var bt int
+	must(t, db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&bt))
+
+	if bt != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", bt)
 	}
 }
 
