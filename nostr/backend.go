@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -340,11 +341,7 @@ func (b *Backend) discoverSubscriptionRelays(ctx context.Context) []string {
 		}
 	}
 
-	for _, r := range b.cfg.Relays {
-		addRelay(r)
-	}
-
-	for _, r := range b.cfg.DMRelays {
+	for _, r := range slices.Concat(b.cfg.Relays, b.cfg.DMRelays) {
 		addRelay(r)
 	}
 
