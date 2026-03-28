@@ -323,44 +323,11 @@ func (b *Backend) setupCrypto(ctx context.Context) error {
 		return fmt.Errorf("wrapping crypto database: %w", err)
 	}
 
-	cryptoHelper, err := cryptohelper.NewCryptoHelper(b.client, []byte(b.cfg.PickleKey), db)
+	cryptoHelper, err := b.initCryptoHelper(ctx, db)
 	if err != nil {
 		db.Close()
 
-		return fmt.Errorf("creating crypto helper: %w", err)
-	}
-
-	if err := cryptoHelper.Init(ctx); err != nil {
-		// Handle stale crypto state: keys exist on the server but the local
-		// "shared" flag is false (e.g. crash between key upload and flag save).
-		// Fix by marking the account as shared in the DB and retrying.
-		if strings.Contains(err.Error(), "olm account is not marked as shared") {
-			slog.Warn("crypto state mismatch: keys on server but not marked shared locally, fixing", "error", err)
-
-			if _, execErr := db.Exec(ctx, "UPDATE crypto_account SET shared = true"); execErr != nil {
-				db.Close()
-
-				return fmt.Errorf("fixing shared flag in crypto database: %w", execErr)
-			}
-
-			// Retry with the corrected flag
-			cryptoHelper, err = cryptohelper.NewCryptoHelper(b.client, []byte(b.cfg.PickleKey), db)
-			if err != nil {
-				db.Close()
-
-				return fmt.Errorf("creating crypto helper after flag fix: %w", err)
-			}
-
-			if err := cryptoHelper.Init(ctx); err != nil {
-				db.Close()
-
-				return fmt.Errorf("initializing crypto after flag fix: %w", err)
-			}
-		} else {
-			db.Close()
-
-			return fmt.Errorf("initializing crypto: %w", err)
-		}
+		return err
 	}
 
 	b.client.Crypto = cryptoHelper
@@ -373,6 +340,42 @@ func (b *Backend) setupCrypto(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// initCryptoHelper creates and initializes the crypto helper, retrying once
+// after fixing the "shared" flag if the local DB got out of sync with the
+// server (e.g. crash between key upload and flag save).
+func (b *Backend) initCryptoHelper(ctx context.Context, db *dbutil.Database) (*cryptohelper.CryptoHelper, error) {
+	helper, err := cryptohelper.NewCryptoHelper(b.client, []byte(b.cfg.PickleKey), db)
+	if err != nil {
+		return nil, fmt.Errorf("creating crypto helper: %w", err)
+	}
+
+	err = helper.Init(ctx)
+	if err == nil {
+		return helper, nil
+	}
+
+	if !strings.Contains(err.Error(), "olm account is not marked as shared") {
+		return nil, fmt.Errorf("initializing crypto: %w", err)
+	}
+
+	slog.Warn("crypto state mismatch: keys on server but not marked shared locally, fixing", "error", err)
+
+	if _, err := db.Exec(ctx, "UPDATE crypto_account SET shared = true"); err != nil {
+		return nil, fmt.Errorf("fixing shared flag in crypto database: %w", err)
+	}
+
+	helper, err = cryptohelper.NewCryptoHelper(b.client, []byte(b.cfg.PickleKey), db)
+	if err != nil {
+		return nil, fmt.Errorf("creating crypto helper after flag fix: %w", err)
+	}
+
+	if err := helper.Init(ctx); err != nil {
+		return nil, fmt.Errorf("initializing crypto after flag fix: %w", err)
+	}
+
+	return helper, nil
 }
 
 func (b *Backend) ensureCrossSigning(ctx context.Context) error {
