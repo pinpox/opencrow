@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -208,10 +209,10 @@ func (w *Worker) SkillsSummary() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%d skill(s) loaded:\n", len(skills)))
+	fmt.Fprintf(&sb, "%d skill(s) loaded:\n", len(skills))
 
 	for _, s := range skills {
-		sb.WriteString(fmt.Sprintf("- %s\n", filepath.Base(s)))
+		fmt.Fprintf(&sb, "- %s\n", filepath.Base(s))
 	}
 
 	return sb.String()
@@ -601,9 +602,5 @@ func (w *Worker) retryEmptyResponse(ctx context.Context, pi *PiProcess) string {
 		return "(I completed some actions but failed to generate a summary.)"
 	}
 
-	if reply == "" {
-		return "(empty response)"
-	}
-
-	return reply
+	return cmp.Or(reply, "(empty response)")
 }
