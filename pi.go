@@ -71,7 +71,7 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string, fresh bool) (*PiP
 		return nil, fmt.Errorf("creating trigger FIFO: %w", err)
 	}
 
-	args := buildPiArgs(cfg, cfg.SessionDir, fresh)
+	args := buildPiArgs(cfg, fresh)
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
 	cmd.Dir = cfg.WorkingDir
@@ -244,8 +244,8 @@ func startPiProcess(cmd *exec.Cmd, sessionDir string) (*PiProcess, error) {
 	}, nil
 }
 
-func buildPiArgs(cfg PiConfig, sessionDir string, fresh bool) []string {
-	args := []string{"--mode", "rpc", "--session-dir", sessionDir}
+func buildPiArgs(cfg PiConfig, fresh bool) []string {
+	args := []string{"--mode", "rpc", "--session-dir", cfg.SessionDir}
 	if !fresh {
 		args = append(args, "--continue")
 	}
