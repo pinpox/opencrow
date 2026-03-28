@@ -8,6 +8,8 @@
 let
   cfg = config.services.opencrow;
 
+  jsonFormat = pkgs.formats.json { };
+
   # Derive container name and state directory from instance name.
   # The "default" instance (top-level enable) keeps the original
   # paths for backward compatibility.
@@ -98,7 +100,7 @@ let
       };
 
       piSettings = lib.mkOption {
-        type = lib.types.attrsOf lib.types.anything;
+        type = jsonFormat.type;
         default = { };
         description = ''
           Extra keys to include in the generated pi settings.json.
@@ -109,6 +111,25 @@ let
           {
             packages = [ "npm:@foo/bar@1.0.0" ];
             compaction = { enabled = true; };
+          }
+        '';
+      };
+
+      piModels = lib.mkOption {
+        type = jsonFormat.type;
+        default = { };
+        description = ''
+          Contents of pi's models.json. Use this to add custom
+          providers or override properties of built-in models via
+          `modelOverrides` — most commonly `contextWindow` when the
+          configured API tier is narrower than pi's published value
+          (e.g. Anthropic's long-context requires separate usage
+          credits). Without the override pi's auto-compaction never
+          triggers and every turn bounces off a 429.
+        '';
+        example = lib.literalExpression ''
+          {
+            providers.anthropic.modelOverrides."claude-sonnet-4-6".contextWindow = 200000;
           }
         '';
       };
@@ -406,9 +427,11 @@ let
       # Generate a settings.json for pi that lists declared extensions.
       # Installed into PI_CODING_AGENT_DIR at service startup so pi
       # auto-discovers them.
-      piSettingsJson = pkgs.writeText "pi-settings-${name}.json" (
-        builtins.toJSON (icfg.piSettings // { extensions = lib.attrValues resolvedExtensions; })
+      piSettingsJson = jsonFormat.generate "pi-settings-${name}.json" (
+        icfg.piSettings // { extensions = lib.attrValues resolvedExtensions; }
       );
+
+      piModelsJson = jsonFormat.generate "pi-models-${name}.json" icfg.piModels;
 
       # Host-side wrapper to interact with pi inside the container as the opencrow user.
       opencrowPi = pkgs.writeShellScriptBin "${containerName}-pi" ''
@@ -526,7 +549,10 @@ let
               "d ${stateDir} 0750 opencrow opencrow -"
               "d ${icfg.environment.PI_CODING_AGENT_DIR} 0750 opencrow opencrow -"
               "L+ ${icfg.environment.PI_CODING_AGENT_DIR}/settings.json - - - - ${piSettingsJson}"
-            ];
+            ]
+            ++ lib.optional (
+              icfg.piModels != { }
+            ) "L+ ${icfg.environment.PI_CODING_AGENT_DIR}/models.json - - - - ${piModelsJson}";
 
             systemd.services.opencrow = {
               description = "OpenCrow Messaging Bot (${name})";

@@ -17,7 +17,7 @@ Send these as plain text messages in any conversation with the bot:
 | Command | Description |
 |---|---|
 | `!help` | Show available commands |
-| `!restart` | Kill the current pi process and start fresh on the next message |
+| `!restart` | Start a fresh session (discards context). Unlike a service restart, which resumes the on-disk session. |
 | `!stop` | Abort the currently running agent turn |
 | `!compact` | Compact conversation context to reduce token usage |
 | `!skills` | List the skills loaded for this bot instance |

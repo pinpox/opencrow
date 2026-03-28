@@ -53,7 +53,9 @@ type rpcParsed struct {
 }
 
 // StartPi spawns a pi --mode rpc subprocess for the given room.
-func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, error) {
+// fresh=true omits --continue so pi creates a new session file
+// instead of resuming the most recent one from SessionDir.
+func StartPi(ctx context.Context, cfg PiConfig, roomID string, fresh bool) (*PiProcess, error) {
 	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating session dir: %w", err)
 	}
@@ -69,7 +71,7 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, erro
 		return nil, fmt.Errorf("creating trigger FIFO: %w", err)
 	}
 
-	args := buildPiArgs(cfg, cfg.SessionDir)
+	args := buildPiArgs(cfg, cfg.SessionDir, fresh)
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
 	cmd.Dir = cfg.WorkingDir
@@ -148,7 +150,10 @@ type rpcEvent struct {
 	DelayMs      int    `json:"delayMs,omitempty"`      //nolint:tagliatelle // pi protocol uses camelCase
 	ErrorMessage string `json:"errorMessage,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
 
-	// auto_compaction_start fields
+	// auto_retry_end fields — camelCase is dictated by the pi protocol.
+	FinalError string `json:"finalError,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
+
+	// compaction_start fields
 	Reason string `json:"reason,omitempty"`
 
 	// extension_error fields
@@ -164,8 +169,10 @@ type CompactResult struct {
 
 // agentMessage represents a message in an agent_end event.
 type agentMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Role         string          `json:"role"`
+	Content      json.RawMessage `json:"content"`
+	StopReason   string          `json:"stopReason,omitempty"`   //nolint:tagliatelle // pi protocol uses camelCase
+	ErrorMessage string          `json:"errorMessage,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
 }
 
 // contentBlock represents a content block in an assistant message.
@@ -237,8 +244,11 @@ func startPiProcess(cmd *exec.Cmd, sessionDir string) (*PiProcess, error) {
 	}, nil
 }
 
-func buildPiArgs(cfg PiConfig, sessionDir string) []string {
-	args := []string{"--mode", "rpc", "--session-dir", sessionDir, "--continue"}
+func buildPiArgs(cfg PiConfig, sessionDir string, fresh bool) []string {
+	args := []string{"--mode", "rpc", "--session-dir", sessionDir}
+	if !fresh {
+		args = append(args, "--continue")
+	}
 
 	if cfg.Provider != "" {
 		args = append(args, "--provider", cfg.Provider)
@@ -382,15 +392,15 @@ func logSimpleRPCEvent(evt rpcEvent) {
 		slog.Info("pi: agent started")
 	case rpcTypeAgentEnd:
 		slog.Info("pi: agent finished")
-	case "auto_compaction_start":
+	case "compaction_start":
 		attrs := []any{}
 		if evt.Reason != "" {
 			attrs = append(attrs, "reason", evt.Reason)
 		}
 
-		slog.Info("pi: auto-compaction started", attrs...)
-	case "auto_compaction_end":
-		slog.Info("pi: auto-compaction finished")
+		slog.Info("pi: compaction started", attrs...)
+	case "compaction_end":
+		slog.Info("pi: compaction finished")
 	case "turn_start", "turn_end", "message_start", "message_end", rpcTypeExtensionUIRequest:
 		slog.Debug("pi: " + evt.Type)
 	default:
@@ -411,7 +421,7 @@ func logAutoRetryEnd(evt rpcEvent) {
 	if evt.Success != nil && *evt.Success {
 		slog.Info("pi: retry succeeded", "attempt", evt.Attempt)
 	} else {
-		slog.Warn("pi: retry failed", "attempt", evt.Attempt)
+		slog.Warn("pi: retries exhausted", "attempt", evt.Attempt, "error", evt.FinalError)
 	}
 }
 
@@ -474,9 +484,10 @@ func logToolArgs(evt rpcEvent) []any {
 func (p *PiProcess) drainEvents(ctx context.Context, handleFn func(rpcEvent) (bool, error)) error {
 	aborted := false
 
-	for parsed := range p.events {
-		if parsed.err != nil {
-			return parsed.err
+	for {
+		parsed, err := p.nextEvent()
+		if err != nil {
+			return err
 		}
 
 		// Check for cancellation before processing.
@@ -503,9 +514,29 @@ func (p *PiProcess) drainEvents(ctx context.Context, handleFn func(rpcEvent) (bo
 			return nil
 		}
 	}
+}
 
-	// Channel closed = stdout EOF.
-	return errors.New("pi process closed stdout (EOF)")
+// nextEvent blocks for the next parsed stdout event or returns an
+// error if the process exits first. The select on p.done is the load-
+// bearing part: cmd.Wait() racing the stdout reader is a documented
+// footgun, and node extensions that fork grandchildren keep the pipe
+// FD open past Wait(), so the events channel may never close. Without
+// this select, drainEvents hangs forever on a dead process.
+func (p *PiProcess) nextEvent() (rpcParsed, error) {
+	select {
+	case parsed, ok := <-p.events:
+		if !ok {
+			return rpcParsed{}, errors.New("pi process closed stdout (EOF)")
+		}
+
+		if parsed.err != nil {
+			return rpcParsed{}, parsed.err
+		}
+
+		return parsed, nil
+	case <-p.done:
+		return rpcParsed{}, errors.New("pi process exited")
+	}
 }
 
 // handleSideEffects processes events that are common to all commands:
@@ -532,30 +563,153 @@ func (p *PiProcess) handleSideEffects(evt rpcEvent) error {
 	return nil
 }
 
-func (p *PiProcess) waitForResult(ctx context.Context) (string, error) {
-	var reply string
+// resultWaiter tracks state across the agent_end / auto_retry_* event
+// sequence. Pi's retry loop emits agent_end for each failed attempt
+// before starting the next:
+//
+//	agent_end(stopReason=error) → auto_retry_start → agent_start → … → auto_retry_end
+//
+// Returning on the first error agent_end is wrong twice over: we miss
+// the eventual outcome, and any prompt sent while pi is still looping
+// bounces with "already processing". But an error agent_end *may* be
+// final — if retry is disabled or the error isn't in pi's retryable
+// set, no auto_retry_* events follow and pi just goes idle with
+// nothing further on the wire. We must therefore commit the error
+// immediately on agent_end and let auto_retry_start/compaction_start
+// rescind it if they arrive next.
+type resultWaiter struct {
+	reply    string
+	finalErr string
+}
 
-	err := p.drainEvents(ctx, func(evt rpcEvent) (bool, error) {
-		if evt.Type != rpcTypeAgentEnd {
-			return false, nil
+// continuesTurn returns true for events that mean pi is still working
+// on the current prompt after an error agent_end — retry backoff or
+// overflow-triggered auto-compaction. Both are followed by a fresh
+// agent_start/end cycle, so the error that preceded them wasn't final.
+func continuesTurn(t string) bool {
+	return t == rpcTypeAutoRetryStart || t == "compaction_start"
+}
+
+func (w *resultWaiter) handle(evt rpcEvent) (bool, error) {
+	switch evt.Type {
+	case rpcTypeAutoRetryEnd:
+		// success=true fires from the message handler *before* the
+		// successful agent_end, so keep draining. success=false:
+		// retries exhausted, commit finalError.
+		if evt.Success == nil || !*evt.Success {
+			w.finalErr = evt.FinalError
+
+			return true, nil
 		}
 
-		reply = extractLastAssistantText(evt.Messages)
-		if reply == "" {
-			slog.Warn("agent_end contained no assistant text", "messages_len", len(evt.Messages))
-		}
+	case rpcTypeAgentEnd:
+		w.handleAgentEnd(evt)
 
 		return true, nil
-	})
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("context cancelled: %w", ctx.Err())
-		}
-
-		return "", err
 	}
 
-	return reply, nil
+	return false, nil
+}
+
+// graceDrain peeks at the events channel for up to errGraceWindow,
+// looking for an auto_retry_start or compaction_start that would
+// rescind a just-committed error. Returns true if one arrived (caller
+// should keep draining), false if the window elapsed or the channel
+// closed. Reads bypass drainEvents so we don't re-run side effects.
+func (p *PiProcess) graceDrain(ctx context.Context, w *resultWaiter) bool {
+	timer := time.NewTimer(errGraceWindow)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		case <-p.done:
+			return false
+		case parsed, ok := <-p.events:
+			if !ok || parsed.err != nil {
+				return false
+			}
+
+			if continuesTurn(parsed.event.Type) {
+				w.finalErr = ""
+
+				return true
+			}
+			// Swallow anything else in the window (turn_end etc).
+			// The retry loop starts fresh with agent_start so
+			// nothing of value is lost here.
+		}
+	}
+}
+
+func (w *resultWaiter) handleAgentEnd(evt rpcEvent) {
+	last := extractLastAssistant(evt.Messages)
+	w.reply = last.text
+
+	if last.stopReason == "error" {
+		// Commit immediately — if pi deems the error non-retryable
+		// it goes idle with nothing further on the wire, so waiting
+		// for a follow-up would hang. graceDrain gives a subsequent
+		// auto_retry_start or compaction_start a short window
+		// to rescind this.
+		w.finalErr = last.errorMessage
+		slog.Warn("agent_end: provider error", "error", last.errorMessage)
+
+		return
+	}
+
+	if w.reply == "" {
+		slog.Warn("agent_end contained no assistant text", "messages_len", len(evt.Messages))
+	}
+}
+
+// errGraceWindow is how long we wait after an error agent_end for a
+// rescinding auto_retry_start or compaction_start before treating
+// the error as final. Pi emits the follow-up within milliseconds
+// (same event-queue tick), so 200ms is generous without adding
+// perceptible latency to the rare "pi gave up and went idle" path.
+const errGraceWindow = 200 * time.Millisecond
+
+func (p *PiProcess) waitForResult(ctx context.Context) (string, error) {
+	var w resultWaiter
+
+	// The loop may run more than once: drainEvents returns when
+	// handle() says "done", but an error agent_end is only
+	// *tentatively* done — a short grace window lets auto_retry_start
+	// rescind it, at which point we re-enter and keep draining.
+	for {
+		if err := p.drainEvents(ctx, w.handle); err != nil {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("context cancelled: %w", ctx.Err())
+			}
+
+			return "", err
+		}
+
+		if w.finalErr == "" {
+			break // non-error agent_end: definitively done
+		}
+
+		if !p.graceDrain(ctx, &w) {
+			break // grace window elapsed without rescind: error stands
+		}
+		// Rescinded — pi is retrying or compacting. Go around again.
+	}
+
+	// Empty reply + committed error means the provider refused every
+	// attempt, not that the model chose to say nothing. Surface the
+	// error so the user sees "429 … long context" and knows to
+	// !compact instead of staring at "(empty response)" from
+	// retryEmptyResponse re-prompting into the same wall.
+	if w.reply == "" && w.finalErr != "" {
+		return fmt.Sprintf("Request failed: %s\n\nTry `!compact` to shrink the context, or `!restart` for a clean session.",
+			w.finalErr), nil
+	}
+
+	return w.reply, nil
 }
 
 func (p *PiProcess) waitForCompactResponse(ctx context.Context) (*CompactResult, error) {
@@ -600,16 +754,28 @@ func (p *PiProcess) autoRespondExtensionUI(evt rpcEvent) {
 	}
 }
 
-func extractLastAssistantText(messagesRaw json.RawMessage) string {
+// assistantResult is the subset of an assistant message that
+// waitForResult needs to decide whether an agent_end is terminal.
+// stopReason "error" means the provider rejected the turn (429, 5xx,
+// overloaded); pi's retry machinery *may* follow up, so the caller
+// shouldn't treat that agent_end as final until it knows whether
+// auto_retry_start arrives.
+type assistantResult struct {
+	text         string
+	stopReason   string
+	errorMessage string
+}
+
+func extractLastAssistant(messagesRaw json.RawMessage) assistantResult {
 	if len(messagesRaw) == 0 {
-		return ""
+		return assistantResult{}
 	}
 
 	var messages []agentMessage
 	if err := json.Unmarshal(messagesRaw, &messages); err != nil {
 		slog.Warn("failed to parse agent_end messages", "error", err)
 
-		return ""
+		return assistantResult{}
 	}
 
 	for _, msg := range slices.Backward(messages) {
@@ -617,12 +783,14 @@ func extractLastAssistantText(messagesRaw json.RawMessage) string {
 			continue
 		}
 
-		if text := parseAssistantContent(msg.Content); text != "" {
-			return text
+		return assistantResult{
+			text:         parseAssistantContent(msg.Content),
+			stopReason:   msg.StopReason,
+			errorMessage: msg.ErrorMessage,
 		}
 	}
 
-	return ""
+	return assistantResult{}
 }
 
 func parseAssistantContent(raw json.RawMessage) string {
