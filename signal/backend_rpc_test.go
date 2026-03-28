@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +17,23 @@ import (
 
 	"github.com/pinpox/opencrow/backend"
 )
+
+// shortTempDir creates a temp dir under /tmp because macOS temp paths are
+// too long for Unix sockets (104-byte limit), so t.TempDir() is unusable.
+//
+//nolint:usetesting // t.TempDir paths exceed AF_UNIX path length limits
+func shortTempDir(t *testing.T, pattern string) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("/tmp", pattern)
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	return dir
+}
 
 // fakeSignalDaemon is a minimal JSON-RPC server that mimics signal-cli's
 // daemon mode.  It listens on a Unix socket and lets the test push "receive"
@@ -40,17 +58,9 @@ type fakeSignalDaemon struct {
 func newFakeSignalDaemon(t *testing.T) *fakeSignalDaemon {
 	t.Helper()
 
-	// macOS temp paths are too long for Unix sockets (104-byte limit).
-	sockDir, err := os.MkdirTemp("/tmp", "sig-*")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
+	sockPath := filepath.Join(shortTempDir(t, "sig-*"), "s.sock")
 
-	t.Cleanup(func() { os.RemoveAll(sockDir) })
-
-	sockPath := filepath.Join(sockDir, "s.sock")
-
-	ln, err := net.Listen("unix", sockPath)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -67,6 +77,7 @@ func newFakeSignalDaemon(t *testing.T) *fakeSignalDaemon {
 
 	t.Cleanup(func() {
 		_ = ln.Close()
+
 		<-f.done
 	})
 
@@ -114,9 +125,12 @@ func (f *fakeSignalDaemon) respond(id string, result any) {
 		f.t.Fatal("no connection yet")
 	}
 
-	resultJSON, _ := json.Marshal(result)
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		f.t.Fatalf("marshal result: %v", err)
+	}
 
-	_, err := fmt.Fprintf(conn, `{"jsonrpc":"2.0","id":"%s","result":%s}`+"\n", id, resultJSON)
+	_, err = fmt.Fprintf(conn, `{"jsonrpc":"2.0","id":"%s","result":%s}`+"\n", id, resultJSON)
 	if err != nil {
 		f.t.Fatalf("write response: %v", err)
 	}
@@ -144,7 +158,7 @@ func (f *fakeSignalDaemon) waitConnected(timeout time.Duration) {
 	}
 }
 
-func (f *fakeSignalDaemon) pushNotification(method string, params any) {
+func (f *fakeSignalDaemon) pushReceive(params any) {
 	f.t.Helper()
 
 	f.waitConnected(3 * time.Second)
@@ -153,20 +167,14 @@ func (f *fakeSignalDaemon) pushNotification(method string, params any) {
 	conn := f.conn
 	f.connMu.Unlock()
 
-	paramsJSON, _ := json.Marshal(params)
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		f.t.Fatalf("marshal params: %v", err)
+	}
 
-	_, err := fmt.Fprintf(conn, `{"jsonrpc":"2.0","method":"%s","params":%s}`+"\n", method, paramsJSON)
+	_, err = fmt.Fprintf(conn, `{"jsonrpc":"2.0","method":"receive","params":%s}`+"\n", paramsJSON)
 	if err != nil {
 		f.t.Fatalf("write notification: %v", err)
-	}
-}
-
-func (f *fakeSignalDaemon) waitRequest(timeout time.Duration) (rpcRequest, bool) {
-	select {
-	case req := <-f.requestCh:
-		return req, true
-	case <-time.After(timeout):
-		return rpcRequest{}, false
 	}
 }
 
@@ -272,9 +280,7 @@ func makeEnvelope(sender, text string, ts int64, extras map[string]any) map[stri
 		"message":   text,
 	}
 
-	for k, v := range extras {
-		dm[k] = v
-	}
+	maps.Copy(dm, extras)
 
 	return map[string]any{
 		"envelope": map[string]any{
@@ -332,7 +338,7 @@ done
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "signal-cli")
 
-	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(binPath, []byte(script), 0o700); err != nil { //nolint:gosec // executable test helper
 		t.Fatal(err)
 	}
 
@@ -341,8 +347,10 @@ done
 
 // newTestBackend wires up a Backend that connects to the given fake daemon
 // socket. It bypasses the real daemon startup by directly connecting.
-func newTestBackend(t *testing.T, fake *fakeSignalDaemon, account string, allowedUsers map[string]struct{}, handler backend.MessageHandler) *Backend {
+func newTestBackend(t *testing.T, fake *fakeSignalDaemon, allowedUsers map[string]struct{}, handler backend.MessageHandler) *Backend {
 	t.Helper()
+
+	const account = "+49111"
 
 	b := &Backend{
 		cfg: Config{
@@ -354,7 +362,7 @@ func newTestBackend(t *testing.T, fake *fakeSignalDaemon, account string, allowe
 		subscriptionID: -1,
 	}
 
-	conn, err := net.Dial("unix", fake.sockPath)
+	conn, err := (&net.Dialer{}).DialContext(context.Background(), "unix", fake.sockPath)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -369,6 +377,31 @@ func newTestBackend(t *testing.T, fake *fakeSignalDaemon, account string, allowe
 	t.Cleanup(func() { b.clearRPC() })
 
 	return b
+}
+
+func handleTestNotification(ctx context.Context, b *Backend, n rpcNotification) {
+	if n.Method != "receive" {
+		return
+	}
+
+	msg, ok, err := decodeReceiveNotification(n.Params, b.cfg.ConfigDir)
+	if err != nil || !ok {
+		return
+	}
+
+	if msg.SenderID == b.cfg.Account {
+		return
+	}
+
+	if !b.isAllowed(msg.SenderID) {
+		return
+	}
+
+	if !b.claimConversation(msg.ConversationID) {
+		return
+	}
+
+	b.handler(ctx, *msg)
 }
 
 // runReceiveLoop mirrors the core of Run(): subscribe, then select on
@@ -395,28 +428,7 @@ func runReceiveLoop(ctx context.Context, b *Backend) error {
 				return err
 			}
 		case n := <-notifications:
-			if n.Method != "receive" {
-				continue
-			}
-
-			msg, ok, err := decodeReceiveNotification(n.Params, b.cfg.ConfigDir)
-			if err != nil || !ok {
-				continue
-			}
-
-			if msg.SenderID == b.cfg.Account {
-				continue
-			}
-
-			if !b.isAllowed(msg.SenderID) {
-				continue
-			}
-
-			if !b.claimConversation(msg.ConversationID) {
-				continue
-			}
-
-			b.handler(ctx, *msg)
+			handleTestNotification(ctx, b, n)
 		}
 	}
 }
@@ -428,7 +440,7 @@ func TestRun_ReceivesDirectMessage(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -436,11 +448,12 @@ func TestRun_ReceivesDirectMessage(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
-	fake.pushNotification("receive", makeEnvelope("+49222", "hello bot", 1700000000100, nil))
+	fake.pushReceive(makeEnvelope("+49222", "hello bot", 1700000000100, nil))
 	waitForMessages(t, mc, 1)
 
 	cancel()
@@ -473,7 +486,7 @@ func TestRun_ReceivesGroupMessage(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -481,11 +494,12 @@ func TestRun_ReceivesGroupMessage(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
-	fake.pushNotification("receive", makeEnvelope("+49222", "group msg", 1700000000200, map[string]any{
+	fake.pushReceive(makeEnvelope("+49222", "group msg", 1700000000200, map[string]any{
 		"groupInfo": map[string]any{"groupId": "GRP123="},
 	}))
 	waitForMessages(t, mc, 1)
@@ -505,7 +519,7 @@ func TestRun_DropsDisallowedUser(t *testing.T) {
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
 	allowed := map[string]struct{}{"+49222": {}}
-	b := newTestBackend(t, fake, "+49111", allowed, mc.handler)
+	b := newTestBackend(t, fake, allowed, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -513,14 +527,15 @@ func TestRun_DropsDisallowedUser(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
-	fake.pushNotification("receive", makeEnvelope("+49333", "should be dropped", 1700000000300, nil))
+	fake.pushReceive(makeEnvelope("+49333", "should be dropped", 1700000000300, nil))
 	time.Sleep(200 * time.Millisecond)
 
-	fake.pushNotification("receive", makeEnvelope("+49222", "should arrive", 1700000000301, nil))
+	fake.pushReceive(makeEnvelope("+49222", "should arrive", 1700000000301, nil))
 	waitForMessages(t, mc, 1)
 	time.Sleep(200 * time.Millisecond)
 
@@ -542,7 +557,7 @@ func TestRun_DropsSelfMessages(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -550,11 +565,12 @@ func TestRun_DropsSelfMessages(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
-	fake.pushNotification("receive", makeEnvelope("+49111", "self echo", 1700000000400, nil))
+	fake.pushReceive(makeEnvelope("+49111", "self echo", 1700000000400, nil))
 	time.Sleep(300 * time.Millisecond)
 
 	cancel()
@@ -570,7 +586,7 @@ func TestRun_SingleActiveConversation(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -578,20 +594,21 @@ func TestRun_SingleActiveConversation(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// First message claims conversation with +49222.
-	fake.pushNotification("receive", makeEnvelope("+49222", "from A", 1700000000500, nil))
+	fake.pushReceive(makeEnvelope("+49222", "from A", 1700000000500, nil))
 	waitForMessages(t, mc, 1)
 
 	// Second message from different user — should be dropped.
-	fake.pushNotification("receive", makeEnvelope("+49333", "from B", 1700000000501, nil))
+	fake.pushReceive(makeEnvelope("+49333", "from B", 1700000000501, nil))
 	time.Sleep(200 * time.Millisecond)
 
 	// Third from same conversation — should arrive.
-	fake.pushNotification("receive", makeEnvelope("+49222", "from A again", 1700000000502, nil))
+	fake.pushReceive(makeEnvelope("+49222", "from A again", 1700000000502, nil))
 	waitForMessages(t, mc, 2)
 
 	cancel()
@@ -612,7 +629,7 @@ func TestRun_ResetConversationUnlocks(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -620,19 +637,20 @@ func TestRun_ResetConversationUnlocks(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Claim +49222.
-	fake.pushNotification("receive", makeEnvelope("+49222", "first", 1700000000600, nil))
+	fake.pushReceive(makeEnvelope("+49222", "first", 1700000000600, nil))
 	waitForMessages(t, mc, 1)
 
 	// Reset.
 	b.ResetConversation(ctx, "+49222")
 
 	// Now +49333 should succeed.
-	fake.pushNotification("receive", makeEnvelope("+49333", "second", 1700000000601, nil))
+	fake.pushReceive(makeEnvelope("+49333", "second", 1700000000601, nil))
 	waitForMessages(t, mc, 2)
 
 	cancel()
@@ -653,7 +671,7 @@ func TestRun_ReceivesAttachments(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 	b.cfg.ConfigDir = "/var/lib/signal"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -662,11 +680,12 @@ func TestRun_ReceivesAttachments(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
-	fake.pushNotification("receive", makeEnvelope("+49222", "check this", 1700000000700, map[string]any{
+	fake.pushReceive(makeEnvelope("+49222", "check this", 1700000000700, map[string]any{
 		"attachments": []any{
 			map[string]any{"filename": "photo.jpg", "contentType": "image/jpeg"},
 		},
@@ -695,7 +714,7 @@ func TestRun_AttachmentOnlyMessage(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 	b.cfg.ConfigDir = "/data"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -704,12 +723,13 @@ func TestRun_AttachmentOnlyMessage(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
 	// No "message" field — attachment only.
-	fake.pushNotification("receive", makeEnvelope("+49222", "", 1700000000800, map[string]any{
+	fake.pushReceive(makeEnvelope("+49222", "", 1700000000800, map[string]any{
 		"attachments": []any{
 			map[string]any{"filename": "voice.ogg", "contentType": "audio/ogg"},
 		},
@@ -729,7 +749,7 @@ func TestRun_WrappedSubscriptionPayload(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -737,6 +757,7 @@ func TestRun_WrappedSubscriptionPayload(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
@@ -755,7 +776,7 @@ func TestRun_WrappedSubscriptionPayload(t *testing.T) {
 			},
 		},
 	}
-	fake.pushNotification("receive", wrapped)
+	fake.pushReceive(wrapped)
 	waitForMessages(t, mc, 1)
 
 	cancel()
@@ -771,7 +792,7 @@ func TestRun_QuoteReply(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	mc := &messageCollector{}
-	b := newTestBackend(t, fake, "+49111", nil, mc.handler)
+	b := newTestBackend(t, fake, nil, mc.handler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -779,11 +800,12 @@ func TestRun_QuoteReply(t *testing.T) {
 	go fake.autoRespond(ctx, nil)
 
 	runDone := make(chan error, 1)
+
 	go func() { runDone <- runReceiveLoop(ctx, b) }()
 
 	time.Sleep(100 * time.Millisecond)
 
-	fake.pushNotification("receive", makeEnvelope("+49222", "replying", 1700000001000, map[string]any{
+	fake.pushReceive(makeEnvelope("+49222", "replying", 1700000001000, map[string]any{
 		"quote": map[string]any{"id": 1699999999000},
 	}))
 	waitForMessages(t, mc, 1)
@@ -801,7 +823,7 @@ func TestSendMessage_DirectAndGroup(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	sends := &sendRecorder{}
-	b := newTestBackend(t, fake, "+49111", nil, func(_ context.Context, _ backend.Message) {})
+	b := newTestBackend(t, fake, nil, func(_ context.Context, _ backend.Message) {})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -826,6 +848,12 @@ func TestSendMessage_DirectAndGroup(t *testing.T) {
 	if len(calls) != 3 {
 		t.Fatalf("got %d send calls, want 3", len(calls))
 	}
+
+	checkSendCalls(t, calls)
+}
+
+func checkSendCalls(t *testing.T, calls []rpcRequest) {
+	t.Helper()
 
 	// Check DM params.
 	p0 := marshalParams(t, calls[0])
@@ -859,7 +887,7 @@ func TestSendFile(t *testing.T) {
 
 	fake := newFakeSignalDaemon(t)
 	sends := &sendRecorder{}
-	b := newTestBackend(t, fake, "+49111", nil, func(_ context.Context, _ backend.Message) {})
+	b := newTestBackend(t, fake, nil, func(_ context.Context, _ backend.Message) {})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -887,7 +915,7 @@ func TestSendMessage_EmptyTextNoop(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeSignalDaemon(t)
-	b := newTestBackend(t, fake, "+49111", nil, func(_ context.Context, _ backend.Message) {})
+	b := newTestBackend(t, fake, nil, func(_ context.Context, _ backend.Message) {})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -925,13 +953,7 @@ func TestRun_RealProcessLifecycle(t *testing.T) {
 		t.Skip("socat not available, skipping process lifecycle test")
 	}
 
-	sockDir, err := os.MkdirTemp("/tmp", "sig-lifecycle-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer os.RemoveAll(sockDir)
-
+	sockDir := shortTempDir(t, "sig-lifecycle-*")
 	sockPath := filepath.Join(sockDir, "s.sock")
 	binPath := writeFakeSignalCLI(t, sockPath)
 
