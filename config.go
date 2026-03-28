@@ -163,19 +163,11 @@ func (cfg *Config) validateBackend(env envReader) error {
 }
 
 func (m MatrixConfig) validate() error {
-	if m.Homeserver == "" {
-		return errors.New("OPENCROW_MATRIX_HOMESERVER is required")
-	}
-
-	if m.UserID == "" {
-		return errors.New("OPENCROW_MATRIX_USER_ID is required")
-	}
-
-	if m.AccessToken == "" {
-		return errors.New("OPENCROW_MATRIX_ACCESS_TOKEN is required")
-	}
-
-	return nil
+	return errors.Join(
+		requireField(m.Homeserver, "OPENCROW_MATRIX_HOMESERVER"),
+		requireField(m.UserID, "OPENCROW_MATRIX_USER_ID"),
+		requireField(m.AccessToken, "OPENCROW_MATRIX_ACCESS_TOKEN"),
+	)
 }
 
 func loadSignalConfig(env envReader, workingDir string, allowedUsers map[string]struct{}) SignalConfig {
@@ -189,16 +181,18 @@ func loadSignalConfig(env envReader, workingDir string, allowedUsers map[string]
 }
 
 func (s SignalConfig) validate() error {
-	if s.Account == "" {
-		return errors.New("OPENCROW_SIGNAL_ACCOUNT is required")
-	}
+	return errors.Join(
+		requireField(s.Account, "OPENCROW_SIGNAL_ACCOUNT"),
+		requireField(s.BinaryPath, "OPENCROW_SIGNAL_CLI_BINARY"),
+		requireField(s.SocketPath, "OPENCROW_SIGNAL_SOCKET_PATH"),
+	)
+}
 
-	if s.BinaryPath == "" {
-		return errors.New("OPENCROW_SIGNAL_CLI_BINARY must not be empty")
-	}
-
-	if s.SocketPath == "" {
-		return errors.New("OPENCROW_SIGNAL_SOCKET_PATH must not be empty")
+// requireField returns an "is required" error if v is empty. Intended for
+// use with errors.Join so that validate() reports all missing fields at once.
+func requireField(v, name string) error {
+	if v == "" {
+		return fmt.Errorf("%s is required", name)
 	}
 
 	return nil
