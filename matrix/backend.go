@@ -643,19 +643,16 @@ func (b *Backend) downloadAttachment(ctx context.Context, msg *event.MessageEven
 		return "", err
 	}
 
-	switch {
-	case encrypted:
-		if err := b.downloadEncrypted(ctx, mxcURL, msg, destPath); err != nil {
-			os.Remove(destPath)
+	if encrypted {
+		err = b.downloadEncrypted(ctx, mxcURL, msg, destPath)
+	} else {
+		err = b.downloadPlain(ctx, mxcURL, destPath)
+	}
 
-			return "", err
-		}
-	default:
-		if err := b.downloadPlain(ctx, mxcURL, destPath); err != nil {
-			os.Remove(destPath)
+	if err != nil {
+		os.Remove(destPath)
 
-			return "", err
-		}
+		return "", err
 	}
 
 	slog.Info("downloaded attachment", "room", roomID, "path", destPath, "encrypted", encrypted)
@@ -665,14 +662,11 @@ func (b *Backend) downloadAttachment(ctx context.Context, msg *event.MessageEven
 
 // attachmentURL returns the content URI and whether the attachment is encrypted.
 func attachmentURL(msg *event.MessageEventContent) (id.ContentURIString, bool) {
-	switch {
-	case msg.File != nil && msg.File.URL != "":
+	if msg.File != nil && msg.File.URL != "" {
 		return msg.File.URL, true
-	case msg.URL != "":
-		return msg.URL, false
-	default:
-		return "", false
 	}
+
+	return msg.URL, false
 }
 
 // attachmentDestPath creates a unique file path for a downloaded attachment.
