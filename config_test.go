@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -65,38 +66,114 @@ func TestBackendType_Default(t *testing.T) {
 	}
 }
 
-func TestBackendType_Unknown(t *testing.T) {
+// TestLoadConfig_Errors covers the env combinations that must fail
+// validation. Each case only differs in the env map, so a table avoids
+// repeating three near-identical error-checking functions.
+func TestLoadConfig_Errors(t *testing.T) {
 	t.Parallel()
 
-	env := baseMatrixEnv()
-	env["OPENCROW_BACKEND"] = "telegram"
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{
+			name: "unknown backend",
+			env: func() map[string]string {
+				m := baseMatrixEnv()
+				m["OPENCROW_BACKEND"] = "telegram"
 
-	_, err := loadConfig(testEnv(env))
-	if err == nil {
-		t.Fatal("expected error for unknown backend, got nil")
+				return m
+			}(),
+		},
+		{
+			name: "nostr missing private key",
+			env: map[string]string{
+				"OPENCROW_BACKEND":      "nostr",
+				"OPENCROW_NOSTR_RELAYS": "wss://relay.example.com",
+			},
+		},
+		{
+			name: "nostr missing relays",
+			env: map[string]string{
+				"OPENCROW_BACKEND":           "nostr",
+				"OPENCROW_NOSTR_PRIVATE_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := loadConfig(testEnv(tc.env)); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
 	}
 }
 
-func TestNostrConfig_RelayParsing(t *testing.T) {
+// TestNostrConfig_ListParsing covers the comma-separated list env vars
+// (relays, blossom servers, DM relays). All three go through the same
+// splitter, so one table-driven test replaces three copy-pasted ones.
+func TestNostrConfig_ListParsing(t *testing.T) {
 	t.Parallel()
 
-	env := baseNostrEnv()
-	env["OPENCROW_NOSTR_RELAYS"] = "wss://relay1.example.com, wss://relay2.example.com"
-
-	cfg, err := loadConfig(testEnv(env))
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+	cases := []struct {
+		name   string
+		envKey string
+		envVal string
+		get    func(*Config) []string
+		want   []string
+	}{
+		{
+			name:   "relays",
+			envKey: "OPENCROW_NOSTR_RELAYS",
+			envVal: "wss://relay1.example.com, wss://relay2.example.com",
+			get:    func(c *Config) []string { return c.Nostr.Relays },
+			want:   []string{"wss://relay1.example.com", "wss://relay2.example.com"},
+		},
+		{
+			name:   "blossom servers",
+			envKey: "OPENCROW_NOSTR_BLOSSOM_SERVERS",
+			envVal: "https://blossom1.example.com, https://blossom2.example.com",
+			get:    func(c *Config) []string { return c.Nostr.BlossomServers },
+			want:   []string{"https://blossom1.example.com", "https://blossom2.example.com"},
+		},
+		{
+			name:   "DM relays explicit",
+			envKey: "OPENCROW_NOSTR_DM_RELAYS",
+			envVal: "wss://dm1.example.com, wss://dm2.example.com",
+			get:    func(c *Config) []string { return c.Nostr.DMRelays },
+			want:   []string{"wss://dm1.example.com", "wss://dm2.example.com"},
+		},
+		{
+			// Config layer passes through nil; NewBackend applies
+			// the Relays default.
+			name: "DM relays empty when not set",
+			get:  func(c *Config) []string { return c.Nostr.DMRelays },
+			want: nil,
+		},
 	}
 
-	want := []string{"wss://relay1.example.com", "wss://relay2.example.com"}
-	if len(cfg.Nostr.Relays) != len(want) {
-		t.Fatalf("got %d relays, want %d", len(cfg.Nostr.Relays), len(want))
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	for i, r := range cfg.Nostr.Relays {
-		if r != want[i] {
-			t.Errorf("relay[%d] = %q, want %q", i, r, want[i])
-		}
+			env := baseNostrEnv()
+			if tc.envKey != "" {
+				env[tc.envKey] = tc.envVal
+			}
+
+			cfg, err := loadConfig(testEnv(env))
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+
+			got := tc.get(cfg)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -116,86 +193,6 @@ func TestNostrConfig_AllowedUsersNpubDecoding(t *testing.T) {
 	if _, ok := cfg.Nostr.AllowedUsers[hexPK]; !ok {
 		t.Errorf("hex pubkey not in allowed users: got %v", cfg.Nostr.AllowedUsers)
 	}
-}
-
-func TestNostrConfig_MissingPrivateKey(t *testing.T) {
-	t.Parallel()
-
-	env := map[string]string{
-		"OPENCROW_BACKEND":      "nostr",
-		"OPENCROW_NOSTR_RELAYS": "wss://relay.example.com",
-	}
-
-	_, err := loadConfig(testEnv(env))
-	if err == nil {
-		t.Fatal("expected error for missing private key, got nil")
-	}
-}
-
-func TestNostrConfig_BlossomServers(t *testing.T) {
-	t.Parallel()
-
-	env := baseNostrEnv()
-	env["OPENCROW_NOSTR_BLOSSOM_SERVERS"] = "https://blossom1.example.com, https://blossom2.example.com"
-
-	cfg, err := loadConfig(testEnv(env))
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-
-	want := []string{"https://blossom1.example.com", "https://blossom2.example.com"}
-	if len(cfg.Nostr.BlossomServers) != len(want) {
-		t.Fatalf("got %d blossom servers, want %d", len(cfg.Nostr.BlossomServers), len(want))
-	}
-
-	for i, s := range cfg.Nostr.BlossomServers {
-		if s != want[i] {
-			t.Errorf("blossom[%d] = %q, want %q", i, s, want[i])
-		}
-	}
-}
-
-func TestNostrConfig_DMRelays(t *testing.T) {
-	t.Parallel()
-
-	t.Run("explicit", func(t *testing.T) {
-		t.Parallel()
-
-		env := baseNostrEnv()
-		env["OPENCROW_NOSTR_DM_RELAYS"] = "wss://dm1.example.com, wss://dm2.example.com"
-
-		cfg, err := loadConfig(testEnv(env))
-		if err != nil {
-			t.Fatalf("loadConfig: %v", err)
-		}
-
-		want := []string{"wss://dm1.example.com", "wss://dm2.example.com"}
-		if len(cfg.Nostr.DMRelays) != len(want) {
-			t.Fatalf("got %d DM relays, want %d", len(cfg.Nostr.DMRelays), len(want))
-		}
-
-		for i, r := range cfg.Nostr.DMRelays {
-			if r != want[i] {
-				t.Errorf("DMRelays[%d] = %q, want %q", i, r, want[i])
-			}
-		}
-	})
-
-	t.Run("empty when not set", func(t *testing.T) {
-		t.Parallel()
-
-		env := baseNostrEnv()
-
-		cfg, err := loadConfig(testEnv(env))
-		if err != nil {
-			t.Fatalf("loadConfig: %v", err)
-		}
-
-		// Config layer passes through nil; NewBackend applies the Relays default.
-		if len(cfg.Nostr.DMRelays) != 0 {
-			t.Fatalf("DMRelays len = %d, want 0 (defaulting is done by NewBackend)", len(cfg.Nostr.DMRelays))
-		}
-	})
 }
 
 func TestDiscoverSkills_Symlinks(t *testing.T) {
@@ -221,19 +218,5 @@ func TestDiscoverSkills_Symlinks(t *testing.T) {
 	want := filepath.Join(skillsDir, "my-skill")
 	if skills[0] != want {
 		t.Errorf("skill path = %q, want %q", skills[0], want)
-	}
-}
-
-func TestNostrConfig_MissingRelays(t *testing.T) {
-	t.Parallel()
-
-	env := map[string]string{
-		"OPENCROW_BACKEND":           "nostr",
-		"OPENCROW_NOSTR_PRIVATE_KEY": "0000000000000000000000000000000000000000000000000000000000000001",
-	}
-
-	_, err := loadConfig(testEnv(env))
-	if err == nil {
-		t.Fatal("expected error for missing relays, got nil")
 	}
 }
