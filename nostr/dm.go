@@ -89,11 +89,16 @@ func (b *Backend) wrapAndPublish(ctx context.Context, kr gonostr.Keyer, pool *go
 // giftWrap wraps a rumor for target using kr's encrypt/sign callbacks.
 // Factors out the closure boilerplate every nip59.GiftWrap call repeats.
 func giftWrap(ctx context.Context, kr gonostr.Keyer, rumor gonostr.Event, target gonostr.PubKey) (gonostr.Event, error) {
-	return nip59.GiftWrap(rumor, target,
+	evt, err := nip59.GiftWrap(rumor, target,
 		func(s string) (string, error) { return kr.Encrypt(ctx, s, target) },
 		func(e *gonostr.Event) error { return kr.SignEvent(ctx, e) },
 		nil,
 	)
+	if err != nil {
+		return evt, fmt.Errorf("gift-wrapping for %s: %w", target.Hex(), err)
+	}
+
+	return evt, nil
 }
 
 // publishDMGiftWraps publishes the two gift-wrap copies to the appropriate relays.
