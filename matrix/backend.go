@@ -2,6 +2,7 @@
 package matrix
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -198,10 +199,7 @@ func (b *Backend) SendFile(ctx context.Context, conversationID string, filePath 
 		return fmt.Errorf("reading file: %w", err)
 	}
 
-	contentType := mime.TypeByExtension(filepath.Ext(filePath))
-	if contentType == "" {
-		contentType = http.DetectContentType(data)
-	}
+	contentType := cmp.Or(mime.TypeByExtension(filepath.Ext(filePath)), http.DetectContentType(data))
 
 	resp, err := b.client.UploadMedia(ctx, mautrix.ReqUploadMedia{
 		ContentBytes: data,
