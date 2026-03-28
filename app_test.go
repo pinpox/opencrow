@@ -114,100 +114,59 @@ func sendCommand(app *App, command string) {
 	})
 }
 
-func TestApp_Stop_NoSession(t *testing.T) {
+// TestApp_Commands covers the !-commands that reply with a single message.
+// Each case only differs in the input command and what substrings the
+// reply must contain, so a table avoids repeating the setup/assert
+// boilerplate five times.
+func TestApp_Commands(t *testing.T) {
 	t.Parallel()
 
-	app, mb := newTestApp(t)
-	sendCommand(app, "!stop")
-
-	mb.mu.Lock()
-	defer mb.mu.Unlock()
-
-	if len(mb.sentMessages) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+	cases := []struct {
+		name         string
+		command      string
+		wantContains []string
+		wantReset    bool
+	}{
+		{"stop no session", "!stop", []string{"No active session"}, false},
+		{"compact no session", "!compact", []string{"No active session"}, false},
+		{"help", "!help", []string{"!help", "!restart", "!stop", "!compact", "!skills"}, false},
+		{"restart", "!restart", nil, true},
+		{"skills", "!skills", nil, false},
 	}
 
-	if !strings.Contains(mb.sentMessages[0].text, "No active session") {
-		t.Errorf("expected 'No active session' message, got %q", mb.sentMessages[0].text)
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestApp_Compact_NoSession(t *testing.T) {
-	t.Parallel()
+			app, mb := newTestApp(t)
+			sendCommand(app, tc.command)
 
-	app, mb := newTestApp(t)
-	sendCommand(app, "!compact")
+			mb.mu.Lock()
+			defer mb.mu.Unlock()
 
-	mb.mu.Lock()
-	defer mb.mu.Unlock()
+			if len(mb.sentMessages) != 1 {
+				t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+			}
 
-	if len(mb.sentMessages) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
-	}
+			msg := mb.sentMessages[0]
+			if msg.conversationID != testRoom {
+				t.Errorf("sent to %q, want %q", msg.conversationID, testRoom)
+			}
 
-	if !strings.Contains(mb.sentMessages[0].text, "No active session") {
-		t.Errorf("expected 'No active session' message, got %q", mb.sentMessages[0].text)
-	}
-}
+			for _, want := range tc.wantContains {
+				if !strings.Contains(msg.text, want) {
+					t.Errorf("reply %q missing %q", msg.text, want)
+				}
+			}
 
-func TestApp_Help(t *testing.T) {
-	t.Parallel()
-
-	app, mb := newTestApp(t)
-	sendCommand(app, "!help")
-
-	mb.mu.Lock()
-	defer mb.mu.Unlock()
-
-	if len(mb.sentMessages) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
-	}
-
-	msg := mb.sentMessages[0]
-	if msg.conversationID != testRoom {
-		t.Errorf("sent to %q, want %q", msg.conversationID, testRoom)
-	}
-
-	for _, cmd := range []string{"!help", "!restart", "!stop", "!compact", "!skills"} {
-		if !strings.Contains(msg.text, cmd) {
-			t.Errorf("help text missing %q", cmd)
-		}
-	}
-}
-
-func TestApp_Restart(t *testing.T) {
-	t.Parallel()
-
-	app, mb := newTestApp(t)
-	sendCommand(app, "!restart")
-
-	mb.mu.Lock()
-	defer mb.mu.Unlock()
-
-	if len(mb.resetCalls) != 1 || mb.resetCalls[0] != testRoom {
-		t.Errorf("ResetConversation calls = %v, want [%s]", mb.resetCalls, testRoom)
-	}
-
-	if len(mb.sentMessages) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
-	}
-
-	if mb.sentMessages[0].conversationID != testRoom {
-		t.Errorf("sent to %q, want %q", mb.sentMessages[0].conversationID, testRoom)
-	}
-}
-
-func TestApp_Skills(t *testing.T) {
-	t.Parallel()
-
-	app, mb := newTestApp(t)
-	sendCommand(app, "!skills")
-
-	mb.mu.Lock()
-	defer mb.mu.Unlock()
-
-	if len(mb.sentMessages) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(mb.sentMessages))
+			if tc.wantReset {
+				if len(mb.resetCalls) != 1 || mb.resetCalls[0] != testRoom {
+					t.Errorf("ResetConversation calls = %v, want [%s]", mb.resetCalls, testRoom)
+				}
+			} else if len(mb.resetCalls) != 0 {
+				t.Errorf("ResetConversation calls = %v, want none", mb.resetCalls)
+			}
+		})
 	}
 }
 
@@ -283,24 +242,25 @@ follow-up`
 func TestApp_SystemPrompt(t *testing.T) {
 	t.Parallel()
 
-	app, _ := newTestAppWithBackend(t, &mockBackend{systemPromptExtraText: "You are in a Nostr DM."})
-
-	got := app.systemPrompt("Base prompt")
-
-	want := "Base prompt\n\nYou are in a Nostr DM."
-	if got != want {
-		t.Errorf("systemPrompt = %q, want %q", got, want)
+	cases := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{"with extra", "You are in a Nostr DM.", "Base prompt\n\nYou are in a Nostr DM."},
+		{"no extra", "", "Base prompt"},
 	}
-}
 
-func TestApp_SystemPrompt_NoExtra(t *testing.T) {
-	t.Parallel()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	app, _ := newTestApp(t)
+			app, _ := newTestAppWithBackend(t, &mockBackend{systemPromptExtraText: tc.extra})
 
-	got := app.systemPrompt("Base prompt")
-	if got != "Base prompt" {
-		t.Errorf("systemPrompt = %q, want %q", got, "Base prompt")
+			if got := app.systemPrompt("Base prompt"); got != tc.want {
+				t.Errorf("systemPrompt = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
