@@ -3,8 +3,29 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestMatrixConfig_ValidateReportsAllMissing(t *testing.T) {
+	t.Parallel()
+
+	err := (MatrixConfig{}).validate()
+	if err == nil {
+		t.Fatal("expected error for empty MatrixConfig")
+	}
+
+	msg := err.Error()
+	for _, want := range []string{
+		"OPENCROW_MATRIX_HOMESERVER",
+		"OPENCROW_MATRIX_USER_ID",
+		"OPENCROW_MATRIX_ACCESS_TOKEN",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing %q", msg, want)
+		}
+	}
+}
 
 // testEnv returns a getenv function backed by a map.
 func testEnv(m map[string]string) func(string) string {
