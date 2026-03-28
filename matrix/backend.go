@@ -598,11 +598,11 @@ func (b *Backend) handleAttachment(ctx context.Context, msg *event.MessageEventC
 	}
 
 	caption := msg.Body
-	if caption == "" || caption == msg.FileName {
-		caption = "no caption"
+	if caption == msg.FileName {
+		caption = ""
 	}
 
-	return fmt.Sprintf("[User sent a file (%s): %s]\nUse the read tool to view it.", caption, filePath)
+	return backend.AttachmentText(caption, filePath)
 }
 
 func (b *Backend) handleVerify(ctx context.Context, roomID id.RoomID) {

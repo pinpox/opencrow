@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	gonostr "fiatjaf.com/nostr"
+	"github.com/pinpox/opencrow/backend"
 )
 
 // KindFileMessage is the NIP-17 kind for file messages (not yet in go-nostr).
@@ -130,7 +131,7 @@ func (b *Backend) rewriteMediaURLs(ctx context.Context, text, conversationID str
 
 		slog.Debug("nostr: downloaded media URL", "url", rawURL, "localPath", localPath)
 		processed[rawURL] = true
-		replacement := fmt.Sprintf("[User sent a file (no caption): %s]\nUse the read tool to view it.", localPath)
+		replacement := backend.AttachmentText("", localPath)
 		text = strings.ReplaceAll(text, rawURL, replacement)
 	}
 

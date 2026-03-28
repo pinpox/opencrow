@@ -156,7 +156,7 @@ func formatAttachmentText(attachments []receiveAttachment, configDir string) str
 		return ""
 	}
 
-	lines := make([]string, 0, len(attachments)+1)
+	lines := make([]string, 0, len(attachments))
 
 	for _, a := range attachments {
 		caption := strings.TrimSpace(a.Caption)
@@ -173,14 +173,8 @@ func formatAttachmentText(attachments []receiveAttachment, configDir string) str
 
 		filePath := resolveAttachmentPath(a.Filename, configDir)
 
-		if filePath != "" {
-			lines = append(lines, fmt.Sprintf("[User sent a file (%s): %s]", caption, filePath))
-		} else {
-			lines = append(lines, fmt.Sprintf("[User sent a file (%s)]", caption))
-		}
+		lines = append(lines, backend.AttachmentText(caption, filePath))
 	}
-
-	lines = append(lines, "Use the read tool to view it.")
 
 	return strings.Join(lines, "\n")
 }
