@@ -587,11 +587,7 @@ func (b *Backend) dedupRumor(ctx context.Context, rumorHex, evtHex string) bool 
 
 // isAllowed checks whether the sender is in the allowed users set (or if the set is empty).
 func (b *Backend) isAllowed(senderHex string) bool {
-	if len(b.cfg.AllowedUsers) == 0 {
-		return true
-	}
-
-	_, ok := b.cfg.AllowedUsers[senderHex]
+	ok := backend.IsAllowed(b.cfg.AllowedUsers, senderHex)
 	if !ok {
 		slog.Debug("nostr: dropping DM from non-allowed user", "sender", senderHex)
 	}

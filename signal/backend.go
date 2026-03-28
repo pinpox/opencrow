@@ -321,13 +321,7 @@ func (b *Backend) rpcCall(ctx context.Context, method string, params any, out an
 }
 
 func (b *Backend) isAllowed(senderID string) bool {
-	if len(b.allowedUsers) == 0 {
-		return true
-	}
-
-	_, ok := b.allowedUsers[senderID]
-
-	return ok
+	return backend.IsAllowed(b.allowedUsers, senderID)
 }
 
 func (b *Backend) claimConversation(conversationID string) bool {

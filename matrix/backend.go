@@ -430,12 +430,10 @@ func (b *Backend) handleInvite(ctx context.Context, evt *event.Event) {
 		return
 	}
 
-	if len(b.allowedUsers) > 0 {
-		if _, ok := b.allowedUsers[string(evt.Sender)]; !ok {
-			slog.Info("ignoring invite from non-allowed user", "sender", evt.Sender, "room", evt.RoomID)
+	if !backend.IsAllowed(b.allowedUsers, string(evt.Sender)) {
+		slog.Info("ignoring invite from non-allowed user", "sender", evt.Sender, "room", evt.RoomID)
 
-			return
-		}
+		return
 	}
 
 	b.roomMu.Lock()
@@ -559,10 +557,8 @@ func (b *Backend) filterMessage(evt *event.Event) *event.MessageEventContent {
 		return nil
 	}
 
-	if len(b.allowedUsers) > 0 {
-		if _, ok := b.allowedUsers[string(evt.Sender)]; !ok {
-			return nil
-		}
+	if !backend.IsAllowed(b.allowedUsers, string(evt.Sender)) {
+		return nil
 	}
 
 	msg := evt.Content.AsMessage()
