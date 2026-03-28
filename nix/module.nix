@@ -87,7 +87,8 @@ let
           All enabled extensions are written into a generated settings.json
           that pi reads from PI_CODING_AGENT_DIR.
 
-          Bundled extensions: `memory` (cross-session recall via sediment).
+          Bundled extensions: `memory` (cross-session recall via sediment),
+          `reminders` (remind_at/list/cancel tools backed by opencrow.db).
         '';
         example = lib.literalExpression ''
           {
@@ -375,7 +376,7 @@ let
             OPENCROW_HEARTBEAT_INTERVAL = lib.mkOption {
               type = lib.types.str;
               default = "";
-              description = "Heartbeat interval (Go duration, e.g. '30m'). Empty disables heartbeat.";
+              description = "Heartbeat interval (Go duration, e.g. '30m'). Empty disables heartbeat; the reminder dispatcher still runs.";
             };
 
             SEDIMENT_DB = lib.mkOption {

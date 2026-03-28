@@ -390,12 +390,12 @@ func (w *Worker) buildPrompt(item Inbox) (string, bool) {
 	case sourceTrigger:
 		return buildTriggerPrompt(w.triggerPrompt, item.Content), true
 	case sourceHeartbeat:
-		content := w.readHeartbeatContent()
-		if isEffectivelyEmpty(content) {
+		items := parseHeartbeatItems(w.readHeartbeatFile())
+		if len(items) == 0 {
 			return "", false
 		}
 
-		return buildHeartbeatPrompt(w.hbPrompt, content), true
+		return buildHeartbeatPrompt(w.hbPrompt, items), true
 	default:
 		return "", false
 	}
@@ -581,15 +581,15 @@ func (w *Worker) resolveRoomID() string {
 	return id
 }
 
-func (w *Worker) readHeartbeatContent() string {
-	heartbeatPath := filepath.Join(w.piCfg.SessionDir, "HEARTBEAT.md")
+func (w *Worker) readHeartbeatFile() string {
+	path := filepath.Join(w.piCfg.SessionDir, "HEARTBEAT.md")
 
-	heartbeatContent, err := os.ReadFile(heartbeatPath)
+	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		slog.Warn("worker: failed to read HEARTBEAT.md", "path", heartbeatPath, "error", err)
+		slog.Warn("worker: failed to read HEARTBEAT.md", "error", err)
 	}
 
-	return strings.TrimSpace(string(heartbeatContent))
+	return string(data)
 }
 
 func (w *Worker) retryEmptyResponse(ctx context.Context, pi *PiProcess) string {

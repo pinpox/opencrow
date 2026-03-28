@@ -21,6 +21,7 @@ OpenCrow supports multiple messaging backends:
 graph LR
     Transport[Matrix / Nostr / Signal] -->|message| Inbox[(Inbox)]
     Heartbeat -->|timer| Inbox
+    Reminders[(reminders)] -->|due| Inbox
     Trigger["trigger.pipe"] -->|external| Inbox
     Inbox -->|dequeue| Worker -->|RPC| Pi["pi process"]
     Pi -->|response| Worker -->|reply| Transport
@@ -43,4 +44,4 @@ pi process, collects the response, and sends it back.
 - **[Configuration](docs/configuration.md)** — Environment variables, backend settings, secrets, and authentication
 - **[Skills](docs/skills.md)** — Teaching the agent new capabilities via markdown instructions
 - **[Extensions](docs/extensions.md)** — TypeScript lifecycle hooks and custom tools
-- **[Heartbeat](docs/heartbeat.md)** — Periodic wake-ups, trigger pipes, and proactive automation
+- **[Heartbeat & Reminders](docs/heartbeat.md)** — Periodic checks, one-shot reminders, trigger pipes

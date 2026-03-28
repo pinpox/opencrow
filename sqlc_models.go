@@ -13,6 +13,12 @@ type Inbox struct {
 	CreatedAt string
 }
 
+type Reminders struct {
+	ID     int64
+	FireAt string
+	Prompt string
+}
+
 type SentMessages struct {
 	ConversationID string
 	MessageID      string

@@ -56,3 +56,13 @@ SELECT count(*) FROM inbox;
 INSERT INTO inbox (priority, source, content, reply_to)
 SELECT ?, 'heartbeat', '', ''
 WHERE NOT EXISTS (SELECT 1 FROM inbox WHERE source = 'heartbeat');
+
+-- name: DueReminders :many
+-- datetime() normalizes ISO 8601 variants (Z vs +00:00, T vs space) so
+-- lexicographic comparison doesn't break on agent-formatted timestamps.
+DELETE FROM reminders
+WHERE datetime(fire_at) <= datetime(?)
+RETURNING id, fire_at, prompt;
+
+-- name: InsertReminder :exec
+INSERT INTO reminders (fire_at, prompt) VALUES (?, ?);

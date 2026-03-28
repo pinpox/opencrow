@@ -130,6 +130,37 @@ func (q *Queries) DequeueUserItems(ctx context.Context) ([]Inbox, error) {
 	return items, nil
 }
 
+const dueReminders = `-- name: DueReminders :many
+DELETE FROM reminders
+WHERE datetime(fire_at) <= datetime(?)
+RETURNING id, fire_at, prompt
+`
+
+// datetime() normalizes ISO 8601 variants (Z vs +00:00, T vs space) so
+// lexicographic comparison doesn't break on agent-formatted timestamps.
+func (q *Queries) DueReminders(ctx context.Context, datetime interface{}) ([]Reminders, error) {
+	rows, err := q.db.QueryContext(ctx, dueReminders, datetime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reminders
+	for rows.Next() {
+		var i Reminders
+		if err := rows.Scan(&i.ID, &i.FireAt, &i.Prompt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const enqueueHeartbeatIfEmpty = `-- name: EnqueueHeartbeatIfEmpty :execresult
 INSERT INTO inbox (priority, source, content, reply_to)
 SELECT ?, 'heartbeat', '', ''
@@ -177,6 +208,20 @@ func (q *Queries) GetOutbox(ctx context.Context, arg GetOutboxParams) (string, e
 	var text string
 	err := row.Scan(&text)
 	return text, err
+}
+
+const insertReminder = `-- name: InsertReminder :exec
+INSERT INTO reminders (fire_at, prompt) VALUES (?, ?)
+`
+
+type InsertReminderParams struct {
+	FireAt string
+	Prompt string
+}
+
+func (q *Queries) InsertReminder(ctx context.Context, arg InsertReminderParams) error {
+	_, err := q.db.ExecContext(ctx, insertReminder, arg.FireAt, arg.Prompt)
+	return err
 }
 
 const peekInbox = `-- name: PeekInbox :one

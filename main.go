@@ -201,6 +201,10 @@ func wireServices(ctx context.Context, cfg *Config, db *sql.DB, inbox *InboxStor
 
 	worker.piCfg.SystemPrompt = app.systemPrompt(worker.piCfg.SystemPrompt)
 
+	if cfg.Heartbeat.Interval > 0 {
+		worker.piCfg.SystemPrompt += "\n\n" + heartbeatSoul
+	}
+
 	// Start background services.
 	startHeartbeat(ctx, worker, cfg.Heartbeat)
 	startTriggerPipe(ctx, worker, cfg.Pi.SessionDir)

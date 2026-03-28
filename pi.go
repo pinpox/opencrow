@@ -63,7 +63,7 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string, fresh bool) (*PiP
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
 	cmd.Dir = cfg.WorkingDir
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), "OPENCROW_SESSION_DIR="+cfg.SessionDir)
 
 	return startPiProcess(cmd, cfg.SessionDir)
 }

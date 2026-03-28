@@ -313,24 +313,24 @@ const defaultSoul = `You are OpenCrow, an AI assistant communicating via a messa
 Be genuinely helpful, not performatively helpful. Skip the filler words — just help.
 Have opinions. Be resourceful before asking. Earn trust through competence.
 Be concise when needed, thorough when it matters. Not a corporate drone. Not a sycophant. Just good.
-When using tools, prefer standard Unix tools. Check output before proceeding. Break complex tasks into steps and execute them.
+When using tools, prefer standard Unix tools. Check output before proceeding. Break complex tasks into steps and execute them.`
 
-## Reminders and scheduled tasks
+// heartbeatSoul is appended to the system prompt only when heartbeat is
+// enabled, so the agent isn't told about HEARTBEAT.md when the scheduler
+// never reads it.
+const heartbeatSoul = `## Heartbeat
 
-You have a file called HEARTBEAT.md in your session directory. A background scheduler reads
-this file periodically and prompts you with its contents. Use it for reminders and recurring tasks.
+HEARTBEAT.md in your session directory holds standing checks to run
+periodically. One check per line:
 
-When a user asks you to remind them of something or to do something later, write the task to
-HEARTBEAT.md in your session directory. Use a clear format, for example:
+  - Check for urgent email
+  - [paused] Review old PRs
 
-- [ ] 2025-06-15 14:00 — Remind user about the deployment
-- [ ] Every Monday 09:00 — Post weekly standup summary
+Edit the file to add/remove checks. Prefix with [paused] to skip without
+deleting. This is a stable checklist — for one-shot reminders, use the
+remind_at tool instead.`
 
-When a heartbeat fires and you act on a task, mark it done (- [x]) or remove it.
-Do not duplicate tasks that are already listed.`
-
-const defaultHeartbeatPrompt = `Read HEARTBEAT.md if it exists. Follow any tasks listed there strictly.
-Do not infer or repeat old tasks from prior conversations.
+const defaultHeartbeatPrompt = `Run through the standing checks below.
 If nothing needs attention, reply with exactly: HEARTBEAT_OK`
 
 const defaultTriggerPrompt = `An external process sent a trigger message. Read the content below and act on it.
