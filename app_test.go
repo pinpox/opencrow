@@ -96,7 +96,7 @@ func newTestAppWithBackend(t *testing.T, mb *mockBackend) (*App, *mockBackend) {
 
 	inbox := newTestInboxWithDB(ctx, t, db)
 
-	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, HeartbeatConfig{}, "")
+	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, "", "")
 	worker.SetBackend(mb)
 
 	app := NewApp(mb, worker, inbox, db)
