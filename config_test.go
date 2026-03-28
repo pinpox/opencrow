@@ -170,7 +170,11 @@ func TestNostrConfig_ListParsing(t *testing.T) {
 			}
 
 			got := tc.get(cfg)
-			if !slices.Equal(got, tc.want) {
+			if tc.want == nil {
+				if got != nil {
+					t.Errorf("got %#v, want nil", got)
+				}
+			} else if !slices.Equal(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})

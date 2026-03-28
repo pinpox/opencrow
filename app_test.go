@@ -130,8 +130,8 @@ func TestApp_Commands(t *testing.T) {
 		{"stop no session", "!stop", []string{"No active session"}, false},
 		{"compact no session", "!compact", []string{"No active session"}, false},
 		{"help", "!help", []string{"!help", "!restart", "!stop", "!compact", "!skills"}, false},
-		{"restart", "!restart", nil, true},
-		{"skills", "!skills", nil, false},
+		{"restart", "!restart", []string{"Session restarted"}, true},
+		{"skills", "!skills", []string{"No skills loaded"}, false},
 	}
 
 	for _, tc := range cases {
