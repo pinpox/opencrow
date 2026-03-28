@@ -56,7 +56,6 @@ type NostrConfig struct {
 	DMRelays       []string            // OPENCROW_NOSTR_DM_RELAYS (published in kind 10050; defaults to Relays)
 	BlossomServers []string            // OPENCROW_NOSTR_BLOSSOM_SERVERS
 	AllowedUsers   map[string]struct{} // OPENCROW_NOSTR_ALLOWED_USERS (hex pubkeys)
-	SessionBaseDir string              // shared with PiConfig.SessionDir
 	Name           string              // OPENCROW_NOSTR_NAME (kind 0 "name")
 	DisplayName    string              // OPENCROW_NOSTR_DISPLAY_NAME (kind 0 "display_name")
 	About          string              // OPENCROW_NOSTR_ABOUT (kind 0 "about")
@@ -150,7 +149,7 @@ func (cfg *Config) validateBackend(getenv func(string) string) error {
 	case backendMatrix:
 		return cfg.Matrix.validate()
 	case backendNostr:
-		nostrCfg, err := loadNostrConfig(getenv, cfg.Pi.SessionDir)
+		nostrCfg, err := loadNostrConfig(getenv)
 		if err != nil {
 			return err
 		}
@@ -325,7 +324,7 @@ const defaultTriggerPrompt = `An external process sent a trigger message. Read t
 You MUST fully process the trigger before deciding on a response. Only reply with
 exactly HEARTBEAT_OK if your processing rules explicitly tell you to ignore it.`
 
-func loadNostrConfig(getenv func(string) string, sessionBaseDir string) (NostrConfig, error) {
+func loadNostrConfig(getenv func(string) string) (NostrConfig, error) {
 	privateKey, err := loadNostrPrivateKey(getenv)
 	if err != nil {
 		return NostrConfig{}, err
@@ -349,7 +348,6 @@ func loadNostrConfig(getenv func(string) string, sessionBaseDir string) (NostrCo
 		DMRelays:       dmRelays,
 		BlossomServers: parseCommaSeparated(getenv("OPENCROW_NOSTR_BLOSSOM_SERVERS")),
 		AllowedUsers:   allowedUsers,
-		SessionBaseDir: sessionBaseDir,
 		Name:           getenv("OPENCROW_NOSTR_NAME"),
 		DisplayName:    getenv("OPENCROW_NOSTR_DISPLAY_NAME"),
 		About:          getenv("OPENCROW_NOSTR_ABOUT"),
