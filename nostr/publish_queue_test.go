@@ -419,9 +419,15 @@ func TestPublishQueue_BreakerGC(t *testing.T) {
 	q.mu.Lock()
 	// Closed breaker with no referencing item → should be GC'd.
 	q.breakers["wss://gone.example"] = &relayBreaker{state: closed}
-	// Open breaker → should be KEPT even without a referencing item,
-	// so a future enqueue inherits the cooldown.
-	q.breakers["wss://dead.example"] = &relayBreaker{state: open}
+	// Open breaker, cooldown still active → kept so a future enqueue
+	// inherits the cooldown instead of hammering the dead relay fresh.
+	q.breakers["wss://dead.example"] = &relayBreaker{
+		state: open, nextProbe: time.Now().Add(time.Minute),
+	}
+	// Open breaker, long-expired → GC'd so we don't leak forever.
+	q.breakers["wss://ancient.example"] = &relayBreaker{
+		state: open, nextProbe: time.Now().Add(-2 * breakerMaxCooldown),
+	}
 	q.gcBreakersLocked()
 	q.mu.Unlock()
 
@@ -430,7 +436,64 @@ func TestPublishQueue_BreakerGC(t *testing.T) {
 	}
 
 	if _, ok := q.breakers["wss://dead.example"]; !ok {
-		t.Error("open breaker was GC'd but should persist for future enqueues")
+		t.Error("active open breaker was GC'd but should persist for future enqueues")
+	}
+
+	if _, ok := q.breakers["wss://ancient.example"]; ok {
+		t.Error("long-expired open breaker not GC'd")
+	}
+}
+
+// Regression: when every target relay rejects an event, the item must be
+// dropped with a data-loss WARN, not silently swallowed by the "fully
+// delivered" path.
+func TestPublishQueue_AllRelaysReject(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	q := mustNewPublishQueue(t, t.TempDir())
+	defer q.db.Close()
+
+	evt := signTestEvent(t)
+	q.enqueue(ctx, evt, []string{"wss://a.example", "wss://b.example"}, "test")
+
+	q.mu.Lock()
+	item := q.items[0]
+	q.mu.Unlock()
+
+	// Each relay rejects rejectThreshold times → both drop from Pending.
+	for _, r := range []string{"wss://a.example", "wss://b.example"} {
+		for range rejectThreshold {
+			q.recordReject(ctx, item, r, context.DeadlineExceeded, false)
+		}
+	}
+
+	if len(item.Pending) != 0 {
+		t.Fatalf("Pending = %v, want empty", item.Pending)
+	}
+
+	if item.Delivered {
+		t.Fatal("item must not be Delivered when all relays rejected it")
+	}
+
+	// Evict must drop it AND clean the DB row.
+	q.mu.Lock()
+	q.evictLocked(ctx, time.Now())
+	n := len(q.items)
+	q.mu.Unlock()
+
+	if n != 0 {
+		t.Errorf("rejected-by-all item not evicted: %d items remain", n)
+	}
+
+	rows, err := q.db.queries.ListPublishQueue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(rows) != 0 {
+		t.Errorf("DB row for rejected-by-all item not deleted: %d rows", len(rows))
 	}
 }
 

@@ -228,24 +228,28 @@ func (q *publishQueue) drainOnce(ctx context.Context) time.Duration {
 	q.mu.Unlock()
 
 	for relay, items := range work {
+		if ctx.Err() != nil {
+			break
+		}
+
 		_, isProbe := probes[relay]
 
-		if ctx.Err() != nil || !q.publishBatch(ctx, relay, items, isProbe) {
-			// Aborted before resolving this relay's breaker. Roll back
-			// any halfOpen transition so the relay isn't stuck in a
-			// state where allow() always returns deny.
-			if isProbe {
-				q.mu.Lock()
-				if b := q.breakers[relay]; b != nil && b.state == halfOpen {
-					b.state = open
-				}
-				q.mu.Unlock()
-			}
+		if q.publishBatch(ctx, relay, items, isProbe) {
+			delete(probes, relay) // breaker resolved, no rollback needed
+		}
+	}
 
-			if ctx.Err() != nil {
-				break
+	// Roll back every halfOpen transition we made but never resolved
+	// (aborted mid-loop or publishBatch bailed early). allow(halfOpen)
+	// always denies, so leaving them would starve those relays forever.
+	if len(probes) > 0 {
+		q.mu.Lock()
+		for r := range probes {
+			if b := q.breakers[r]; b != nil && b.state == halfOpen {
+				b.state = open
 			}
 		}
+		q.mu.Unlock()
 	}
 
 	q.mu.Lock()
@@ -304,8 +308,6 @@ func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items 
 		return true
 	}
 
-	var anyOK bool
-
 	for _, item := range items {
 		if ctx.Err() != nil {
 			return false // shutdown; breaker left unresolved
@@ -322,8 +324,6 @@ func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items 
 
 			continue
 		}
-
-		anyOK = true
 
 		slog.Info("nostr: published",
 			"relay", relayURL,
@@ -356,8 +356,6 @@ func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items 
 	q.mu.Lock()
 	q.breakerLocked(relayURL).onSuccess()
 	q.mu.Unlock()
-
-	_ = anyOK // kept for potential future metrics
 
 	return true
 }
@@ -403,7 +401,14 @@ func (q *publishQueue) evictLocked(ctx context.Context, now time.Time) {
 
 		switch {
 		case len(item.Pending) == 0:
-			// Fully delivered. dbID should already be 0 but be defensive.
+			if !item.Delivered {
+				// Every relay rejected this event. Data loss, not success.
+				slog.Warn("nostr: DROPPING event rejected by all relays",
+					"event_id", item.Event.ID.Hex(),
+					"event_kind", item.Event.Kind,
+				)
+			}
+
 			if item.dbID != 0 {
 				_ = q.deleteItemLocked(ctx, item.dbID)
 			}
@@ -612,11 +617,17 @@ func (q *publishQueue) gcBreakersLocked() {
 		}
 	}
 
+	now := time.Now()
+
 	for r, b := range q.breakers {
-		// Keep open breakers even if no item wants them right now —
-		// a new enqueue to the same dead relay should inherit the
-		// cooldown, not start fresh.
-		if _, ok := wanted[r]; !ok && b.state == closed {
+		if _, ok := wanted[r]; ok {
+			continue
+		}
+		// Unreferenced. Drop closed breakers immediately; drop open ones
+		// only once their nextProbe has long passed — retaining them lets
+		// a fresh enqueue to a known-dead relay inherit the cooldown, but
+		// we don't want to leak them forever if the relay is gone for good.
+		if b.state == closed || now.Sub(b.nextProbe) > breakerMaxCooldown {
 			delete(q.breakers, r)
 		}
 	}
