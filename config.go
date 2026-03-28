@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -368,11 +369,7 @@ func loadNostrPrivateKey(getenv func(string) string) (string, error) {
 		raw = strings.TrimSpace(string(data))
 	}
 
-	if raw == "" {
-		raw = getenv("OPENCROW_NOSTR_PRIVATE_KEY")
-	}
-
-	if raw == "" {
+	if raw = cmp.Or(raw, getenv("OPENCROW_NOSTR_PRIVATE_KEY")); raw == "" {
 		return "", errors.New("OPENCROW_NOSTR_PRIVATE_KEY or OPENCROW_NOSTR_PRIVATE_KEY_FILE is required")
 	}
 
