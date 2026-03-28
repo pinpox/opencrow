@@ -393,12 +393,7 @@ func logSimpleRPCEvent(evt rpcEvent) {
 	case rpcTypeAgentEnd:
 		slog.Info("pi: agent finished")
 	case "compaction_start":
-		attrs := []any{}
-		if evt.Reason != "" {
-			attrs = append(attrs, "reason", evt.Reason)
-		}
-
-		slog.Info("pi: compaction started", attrs...)
+		slog.Info("pi: compaction started", "reason", evt.Reason)
 	case "compaction_end":
 		slog.Info("pi: compaction finished")
 	case "turn_start", "turn_end", "message_start", "message_end", rpcTypeExtensionUIRequest:
@@ -434,11 +429,8 @@ func logExtensionError(evt rpcEvent) {
 }
 
 func logResponse(evt rpcEvent) {
-	if evt.Success != nil && *evt.Success {
-		slog.Debug("pi: response", "command", evt.Command, "success", true)
-	} else {
-		slog.Debug("pi: response", "command", evt.Command, "success", false, "error", evt.Error)
-	}
+	ok := evt.Success != nil && *evt.Success
+	slog.Debug("pi: response", "command", evt.Command, "success", ok, "error", evt.Error)
 }
 
 // logToolArgs returns slog key-value pairs for a tool_execution_start event,
