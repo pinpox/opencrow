@@ -436,7 +436,7 @@ func (b *Backend) publishProfile(ctx context.Context) {
 		return
 	}
 
-	b.publishToRelays(ctx, evt, b.cfg.Relays, "profile")
+	b.pubQueue.enqueue(ctx, evt, b.cfg.Relays, "profile")
 	b.markMetadataPublished(ctx, 0, hash)
 }
 
@@ -493,7 +493,7 @@ func (b *Backend) publishDMRelayList(ctx context.Context) {
 		return
 	}
 
-	b.publishToRelays(ctx, evt, b.cfg.Relays, "DM relay list")
+	b.pubQueue.enqueue(ctx, evt, b.cfg.Relays, "DM relay list")
 	b.markMetadataPublished(ctx, int64(gonostr.KindDMRelayList), hash)
 }
 

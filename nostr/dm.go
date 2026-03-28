@@ -130,13 +130,13 @@ func (b *Backend) buildDMRumor(ctx context.Context, kr gonostr.Keyer, recipientP
 // publishDMGiftWraps publishes the two gift-wrap copies to the appropriate relays.
 func (b *Backend) publishDMGiftWraps(ctx context.Context, pool *gonostr.Pool, toUs, toThem gonostr.Event, recipientPK gonostr.PubKey) {
 	// Publish our copy to our DM relays.
-	b.publishToRelays(ctx, toUs, b.cfg.DMRelays, "DM toUs")
+	b.pubQueue.enqueue(ctx, toUs, b.cfg.DMRelays, "DM toUs")
 
 	theirRelays := b.recipientRelays(ctx, recipientPK, pool)
 
 	slog.Debug("nostr: sending DM", "recipient", recipientPK.Hex(), "their_relays", theirRelays)
 
-	b.publishToRelays(ctx, toThem, theirRelays, "DM toThem")
+	b.pubQueue.enqueue(ctx, toThem, theirRelays, "DM toThem")
 }
 
 // sendReaction sends a NIP-25 kind 7 reaction gift-wrapped via NIP-59 to
@@ -170,7 +170,7 @@ func (b *Backend) sendReaction(ctx context.Context, rumorID gonostr.ID, recipien
 		return
 	}
 
-	b.publishToRelays(ctx, toThem, b.recipientRelays(ctx, recipientPK, b.pool), "reaction")
+	b.pubQueue.enqueue(ctx, toThem, b.recipientRelays(ctx, recipientPK, b.pool), "reaction")
 }
 
 // recipientRelays resolves the recipient's DM relays via NIP-17 discovery,
@@ -182,10 +182,4 @@ func (b *Backend) recipientRelays(ctx context.Context, recipientPK gonostr.PubKe
 	}
 
 	return relays
-}
-
-// publishToRelays enqueues an event for publishing to the given relays.
-// The actual publishing happens asynchronously via the queue's drain loop.
-func (b *Backend) publishToRelays(ctx context.Context, evt gonostr.Event, relays []string, label string) {
-	b.pubQueue.enqueue(ctx, evt, relays, label)
 }
