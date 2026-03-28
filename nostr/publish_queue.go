@@ -486,12 +486,7 @@ func (q *publishQueue) nextWakeLocked(now time.Time) time.Duration {
 		return 0
 	}
 
-	d := earliest.Sub(now)
-	if d < 0 {
-		return 0
-	}
-
-	return d
+	return max(earliest.Sub(now), 0)
 }
 
 // notifyFlush releases test waiters whose generation has been surpassed.
