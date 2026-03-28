@@ -269,14 +269,8 @@ func discoverSkills(dir string) []string {
 
 func parseAllowedUsers(val string) map[string]struct{} {
 	allowedUsers := make(map[string]struct{})
-
-	if val != "" {
-		for u := range strings.SplitSeq(val, ",") {
-			u = strings.TrimSpace(u)
-			if u != "" {
-				allowedUsers[u] = struct{}{}
-			}
-		}
+	for _, u := range parseCommaSeparated(val) {
+		allowedUsers[u] = struct{}{}
 	}
 
 	return allowedUsers
