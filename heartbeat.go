@@ -71,7 +71,7 @@ func isEffectivelyEmpty(content string) bool {
 	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 
-		if line == "" || isMarkdownHeader(line) || isEmptyListItem(line) {
+		if line == "" || strings.HasPrefix(line, "#") || isEmptyListItem(line) {
 			continue
 		}
 
@@ -79,10 +79,6 @@ func isEffectivelyEmpty(content string) bool {
 	}
 
 	return true
-}
-
-func isMarkdownHeader(line string) bool {
-	return strings.HasPrefix(line, "#")
 }
 
 func isEmptyListItem(line string) bool {
