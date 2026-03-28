@@ -38,9 +38,10 @@ type Worker struct {
 	hbPrompt      string
 	triggerPrompt string
 
-	// mu protects pi, lastUse, compactResult, currentPriority, currentCancel.
+	// mu protects pi, lastUse, compactResult, currentPriority, currentCancel, freshStart.
 	mu              sync.Mutex
 	pi              *PiProcess
+	freshStart      bool // next ensurePi spawns without --continue
 	lastUse         time.Time
 	currentPriority int64
 	currentCancel   context.CancelFunc
@@ -146,8 +147,18 @@ func (w *Worker) IsActive() bool {
 	return w.pi != nil && w.pi.IsAlive()
 }
 
-// Restart kills the current pi process. The next inbox item starts a fresh one.
-func (w *Worker) Restart() { w.stopPi() }
+// Restart kills the current pi process and marks the next spawn to
+// skip --continue. Without the flag, the next ensurePi would resume
+// the same on-disk session (pi persists sessions as jsonl files that
+// --continue picks up), so a user stuck at a 429 context-limit wall
+// would restart straight back into it.
+func (w *Worker) Restart() {
+	w.mu.Lock()
+	w.freshStart = true
+	w.mu.Unlock()
+
+	w.stopPi()
+}
 
 // Compact enqueues a compact operation and waits for the result.
 func (w *Worker) Compact(ctx context.Context) (*CompactResult, error) {
@@ -512,11 +523,15 @@ func (w *Worker) ensurePi(ctx context.Context) (*PiProcess, error) {
 
 		return pi, nil
 	}
+
+	fresh := w.freshStart
+	w.freshStart = false
+
 	w.mu.Unlock()
 
 	roomID := w.resolveRoomID()
 
-	pi, err := StartPi(ctx, w.piCfg, roomID)
+	pi, err := StartPi(ctx, w.piCfg, roomID, fresh)
 	if err != nil {
 		return nil, err
 	}

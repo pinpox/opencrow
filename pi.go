@@ -53,7 +53,9 @@ type rpcParsed struct {
 }
 
 // StartPi spawns a pi --mode rpc subprocess for the given room.
-func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, error) {
+// fresh=true omits --continue so pi creates a new session file
+// instead of resuming the most recent one from SessionDir.
+func StartPi(ctx context.Context, cfg PiConfig, roomID string, fresh bool) (*PiProcess, error) {
 	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating session dir: %w", err)
 	}
@@ -69,7 +71,7 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string) (*PiProcess, erro
 		return nil, fmt.Errorf("creating trigger FIFO: %w", err)
 	}
 
-	args := buildPiArgs(cfg, cfg.SessionDir)
+	args := buildPiArgs(cfg, cfg.SessionDir, fresh)
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
 	cmd.Dir = cfg.WorkingDir
@@ -242,8 +244,11 @@ func startPiProcess(cmd *exec.Cmd, sessionDir string) (*PiProcess, error) {
 	}, nil
 }
 
-func buildPiArgs(cfg PiConfig, sessionDir string) []string {
-	args := []string{"--mode", "rpc", "--session-dir", sessionDir, "--continue"}
+func buildPiArgs(cfg PiConfig, sessionDir string, fresh bool) []string {
+	args := []string{"--mode", "rpc", "--session-dir", sessionDir}
+	if !fresh {
+		args = append(args, "--continue")
+	}
 
 	if cfg.Provider != "" {
 		args = append(args, "--provider", cfg.Provider)

@@ -92,7 +92,7 @@ func (a *App) handleHelp(ctx context.Context, msg backend.Message) {
 func (a *App) handleRestart(ctx context.Context, msg backend.Message) {
 	a.backend.ResetConversation(ctx, msg.ConversationID)
 	a.worker.Restart()
-	a.backend.SendMessage(ctx, msg.ConversationID, "Session restarted. Next message will use a fresh process.", "")
+	a.backend.SendMessage(ctx, msg.ConversationID, "Session restarted. Next message starts a fresh session (previous context discarded).", "")
 }
 
 func (a *App) handleStop(ctx context.Context, msg backend.Message) {
