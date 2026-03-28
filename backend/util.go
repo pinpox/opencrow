@@ -1,6 +1,42 @@
 package backend
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
+
+// ActiveConversation tracks a single active conversation ID. Backends that
+// only serve one conversation at a time embed this to share the claim/reset
+// logic instead of reimplementing the same mutex-guarded string.
+type ActiveConversation struct {
+	mu sync.Mutex
+	id string
+}
+
+// Claim attempts to set id as the active conversation. It succeeds if no
+// conversation is active yet or if id is already the active one. Returns
+// false when a different conversation is already claimed.
+func (a *ActiveConversation) Claim(id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.id == "" {
+		a.id = id
+
+		return true
+	}
+
+	return a.id == id
+}
+
+// Reset clears the active conversation if it matches id.
+func (a *ActiveConversation) Reset(id string) {
+	a.mu.Lock()
+	if a.id == id {
+		a.id = ""
+	}
+	a.mu.Unlock()
+}
 
 // AttachmentText returns the canonical "[User sent a file ...]" line that
 // backends inject into the conversation when an attachment is received.

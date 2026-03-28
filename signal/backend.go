@@ -36,8 +36,7 @@ type Backend struct {
 	handler      backend.MessageHandler
 	allowedUsers map[string]struct{}
 
-	activeMu     sync.Mutex
-	activeConvID string
+	active backend.ActiveConversation
 
 	cancelMu sync.Mutex
 	cancelFn context.CancelFunc
@@ -246,11 +245,7 @@ func (b *Backend) SetTyping(_ context.Context, _ string, _ bool) {}
 
 // ResetConversation clears active conversation tracking.
 func (b *Backend) ResetConversation(_ context.Context, conversationID string) {
-	b.activeMu.Lock()
-	if b.activeConvID == conversationID {
-		b.activeConvID = ""
-	}
-	b.activeMu.Unlock()
+	b.active.Reset(conversationID)
 }
 
 // SystemPromptExtra returns Signal-specific system prompt context.
@@ -325,16 +320,7 @@ func (b *Backend) isAllowed(senderID string) bool {
 }
 
 func (b *Backend) claimConversation(conversationID string) bool {
-	b.activeMu.Lock()
-	defer b.activeMu.Unlock()
-
-	if b.activeConvID == "" {
-		b.activeConvID = conversationID
-
-		return true
-	}
-
-	return b.activeConvID == conversationID
+	return b.active.Claim(conversationID)
 }
 
 func (b *Backend) subscribeReceive(ctx context.Context, client *jsonRPCClient) error {

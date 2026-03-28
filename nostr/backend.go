@@ -62,8 +62,7 @@ type Backend struct {
 	cancelFn context.CancelFunc
 
 	// Single active conversation tracking
-	activeMu     sync.Mutex
-	activeConvID string
+	active backend.ActiveConversation
 
 	// Persistent retry queue for failed publishes.
 	pubQueue *publishQueue
@@ -262,11 +261,7 @@ func (b *Backend) SetTyping(_ context.Context, _ string, _ bool) {}
 
 // ResetConversation clears the active conversation if it matches conversationID.
 func (b *Backend) ResetConversation(_ context.Context, conversationID string) {
-	b.activeMu.Lock()
-	if b.activeConvID == conversationID {
-		b.activeConvID = ""
-	}
-	b.activeMu.Unlock()
+	b.active.Reset(conversationID)
 }
 
 // SystemPromptExtra returns Nostr-specific system prompt context.
@@ -598,23 +593,12 @@ func (b *Backend) isAllowed(senderHex string) bool {
 // claimConversation tries to set the active conversation to senderHex.
 // Returns false if a different conversation is already active.
 func (b *Backend) claimConversation(senderHex string) bool {
-	b.activeMu.Lock()
-	defer b.activeMu.Unlock()
-
-	if b.activeConvID == "" {
-		b.activeConvID = senderHex
-		slog.Info("nostr: active conversation set", "pubkey", senderHex)
-
-		return true
+	ok := b.active.Claim(senderHex)
+	if !ok {
+		slog.Info("nostr: dropping DM, different active conversation", "sender", senderHex)
 	}
 
-	if b.activeConvID != senderHex {
-		slog.Info("nostr: dropping DM, different active conversation", "active", b.activeConvID, "sender", senderHex)
-
-		return false
-	}
-
-	return true
+	return ok
 }
 
 // rumorReplyTarget returns the value of the first "e" tag in the rumor, or ""
