@@ -35,7 +35,6 @@ func TestPublishQueue_EnqueueAndDrain(t *testing.T) {
 		t.Fatalf("queue length = %d, want 1", q.Len())
 	}
 
-	// Items are due immediately, so drain should publish them.
 	q.drainOnce(ctx)
 
 	if q.Len() != 0 {
@@ -84,19 +83,29 @@ func TestPublishQueue_PartialSuccess_DeliveredNotPersisted(t *testing.T) {
 
 	evt := signTestEvent(t)
 
-	// Enqueue to one good relay and one unreachable relay.
+	// One good relay, one unreachable.
 	q.enqueue(ctx, evt, []string{goodURL, unreachableRelay}, "test")
 
 	q.drainOnce(ctx)
 
-	// Good relay succeeded → item is delivered. Bad relay still pending.
+	// Good relay succeeded → delivered. Bad relay still pending in memory.
 	if q.Len() != 1 {
 		t.Fatalf("queue length = %d, want 1 (bad relay still pending)", q.Len())
 	}
 
 	q.mu.Lock()
-	if !q.items[0].Delivered {
+	item := q.items[0]
+
+	if !item.Delivered {
 		t.Error("item should be marked as delivered (one relay succeeded)")
+	}
+
+	if _, ok := item.Pending[unreachableRelay]; !ok {
+		t.Error("unreachable relay should still be in Pending set")
+	}
+
+	if _, ok := item.Pending[goodURL]; ok {
+		t.Error("good relay should have been removed from Pending set")
 	}
 	q.mu.Unlock()
 
@@ -151,29 +160,203 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 		t.Error("loaded item should not be marked as delivered")
 	}
 
+	if _, ok := loaded.Pending[unreachableRelay]; !ok {
+		t.Error("loaded item should have relay in Pending set")
+	}
+
 	q2.db.Close()
 }
 
-func TestPublishQueue_BackoffCapsAtMax(t *testing.T) {
+func TestPublishQueue_DeliveredTTL(t *testing.T) {
 	t.Parallel()
 
-	prev := calcBackoff(1)
+	ctx := context.Background()
 
-	for attempt := 2; attempt <= 20; attempt++ {
-		cur := calcBackoff(attempt)
-		if cur < prev && cur != maxBackoff {
-			t.Errorf("calcBackoff(%d) = %v < calcBackoff(%d) = %v", attempt, cur, attempt-1, prev)
-		}
+	q := mustNewPublishQueue(t, t.TempDir())
+	defer q.db.Close()
 
-		if cur > maxBackoff {
-			t.Errorf("calcBackoff(%d) = %v > maxBackoff %v", attempt, cur, maxBackoff)
-		}
+	// Fabricate an item that's delivered but has a straggler relay,
+	// and is older than ttlDelivered.
+	q.mu.Lock()
+	q.items = append(q.items, &publishItem{
+		Event:     signTestEvent(t),
+		Pending:   map[string]struct{}{unreachableRelay: {}},
+		Delivered: true,
+		CreatedAt: time.Now().Add(-ttlDelivered - time.Minute),
+	})
+	q.evictLocked(ctx, time.Now())
+	n := len(q.items)
+	q.mu.Unlock()
 
-		prev = cur
+	if n != 0 {
+		t.Errorf("delivered item past TTL not evicted: %d items remain", n)
+	}
+}
+
+func TestPublishQueue_UndeliveredTTL(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	q := mustNewPublishQueue(t, dir)
+	defer q.db.Close()
+
+	evt := signTestEvent(t)
+
+	// Enqueue normally so it's persisted.
+	q.enqueue(ctx, evt, []string{unreachableRelay}, "test")
+
+	// Age it past the undelivered TTL.
+	q.mu.Lock()
+	q.items[0].CreatedAt = time.Now().Add(-ttlUndelivered - time.Hour)
+	q.evictLocked(ctx, time.Now())
+	n := len(q.items)
+	q.mu.Unlock()
+
+	if n != 0 {
+		t.Errorf("undelivered item past TTL not evicted: %d items remain", n)
 	}
 
-	if calcBackoff(100) != maxBackoff {
-		t.Errorf("calcBackoff(100) = %v, want %v (should be capped)", calcBackoff(100), maxBackoff)
+	// DB row should also be gone.
+	rows, err := q.db.queries.ListPublishQueue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(rows) != 0 {
+		t.Errorf("expired item still in DB: %d rows", len(rows))
+	}
+}
+
+func TestRelayBreaker_TripsAfterThreshold(t *testing.T) {
+	t.Parallel()
+
+	b := &relayBreaker{state: closed}
+	now := time.Now()
+
+	for i := range breakerThreshold - 1 {
+		b.onFailure(now)
+
+		if b.state != closed {
+			t.Fatalf("breaker opened after %d failures, want %d", i+1, breakerThreshold)
+		}
+	}
+
+	b.onFailure(now)
+
+	if b.state != open {
+		t.Errorf("breaker state = %v, want open after %d failures", b.state, breakerThreshold)
+	}
+
+	if b.allow(now) != deny {
+		t.Error("open breaker should deny before cooldown expires")
+	}
+
+	// Regression: first trip must start at base cooldown, not 2×base.
+	if b.cooldown != breakerBaseCooldown {
+		t.Errorf("first-trip cooldown = %v, want %v", b.cooldown, breakerBaseCooldown)
+	}
+}
+
+func TestRelayBreaker_HalfOpenProbe(t *testing.T) {
+	t.Parallel()
+
+	b := &relayBreaker{state: closed}
+	now := time.Now()
+
+	for range breakerThreshold {
+		b.onFailure(now)
+	}
+
+	// Advance past cooldown.
+	later := b.nextProbe.Add(time.Second)
+
+	if got := b.allow(later); got != allowProbe {
+		t.Fatalf("allow after cooldown = %v, want allowProbe", got)
+	}
+
+	if b.state != halfOpen {
+		t.Errorf("state after probe = %v, want halfOpen", b.state)
+	}
+
+	// Second call while half-open should deny (one probe only).
+	if got := b.allow(later); got != deny {
+		t.Errorf("second allow while halfOpen = %v, want deny", got)
+	}
+
+	// Probe succeeds → breaker closes and resets.
+	b.onSuccess()
+
+	if b.state != closed {
+		t.Errorf("state after success = %v, want closed", b.state)
+	}
+
+	if b.failures != 0 {
+		t.Errorf("failures after success = %d, want 0", b.failures)
+	}
+}
+
+func TestRelayBreaker_CooldownDoublesAndCaps(t *testing.T) {
+	t.Parallel()
+
+	b := &relayBreaker{state: closed}
+	now := time.Now()
+
+	// Trip initially.
+	for range breakerThreshold {
+		b.onFailure(now)
+	}
+
+	if b.cooldown != breakerBaseCooldown {
+		t.Fatalf("initial cooldown = %v, want %v", b.cooldown, breakerBaseCooldown)
+	}
+
+	prev := b.cooldown
+
+	for range 20 {
+		// Simulate: cooldown expires, probe fails, re-opens.
+		now = b.nextProbe.Add(time.Second)
+		b.allow(now) // transitions to halfOpen
+		b.onFailure(now)
+
+		if b.cooldown < prev && b.cooldown != breakerMaxCooldown {
+			t.Errorf("cooldown shrank: %v < %v", b.cooldown, prev)
+		}
+
+		if b.cooldown > breakerMaxCooldown {
+			t.Errorf("cooldown %v exceeds max %v", b.cooldown, breakerMaxCooldown)
+		}
+
+		prev = b.cooldown
+	}
+
+	if b.cooldown != breakerMaxCooldown {
+		t.Errorf("cooldown = %v, want capped at %v", b.cooldown, breakerMaxCooldown)
+	}
+}
+
+func TestPublishQueue_BreakerGC(t *testing.T) {
+	t.Parallel()
+
+	q := mustNewPublishQueue(t, t.TempDir())
+	defer q.db.Close()
+
+	q.mu.Lock()
+	// Closed breaker with no referencing item → should be GC'd.
+	q.breakers["wss://gone.example"] = &relayBreaker{state: closed}
+	// Open breaker → should be KEPT even without a referencing item,
+	// so a future enqueue inherits the cooldown.
+	q.breakers["wss://dead.example"] = &relayBreaker{state: open}
+	q.gcBreakersLocked()
+	q.mu.Unlock()
+
+	if _, ok := q.breakers["wss://gone.example"]; ok {
+		t.Error("closed unreferenced breaker not GC'd")
+	}
+
+	if _, ok := q.breakers["wss://dead.example"]; !ok {
+		t.Error("open breaker was GC'd but should persist for future enqueues")
 	}
 }
 

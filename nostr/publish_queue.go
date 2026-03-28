@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -13,48 +13,69 @@ import (
 	gonostr "fiatjaf.com/nostr"
 )
 
+// Timeouts and TTLs.
 const (
-	initialBackoff    = 5 * time.Second
-	maxBackoff        = 5 * time.Minute
-	backoffMultiplier = 2.0
-	publishTimeout    = 15 * time.Second
+	publishTimeout = 15 * time.Second
+
+	// ttlUndelivered is the hard deadline for an event that no relay has
+	// accepted yet. Past this we log WARN and drop it — the message is
+	// lost. 24h gives plenty of slack for transient outages while still
+	// bounding DB growth.
+	ttlUndelivered = 24 * time.Hour
+
+	// ttlDelivered is the best-effort window for publishing to remaining
+	// relays after at least one has accepted the event. The event is
+	// already on the Nostr network and will propagate via gossip, so
+	// extra relays are just redundancy.
+	ttlDelivered = 10 * time.Minute
+)
+
+// Circuit-breaker tuning.
+const (
+	// breakerThreshold is how many consecutive failures trip the breaker.
+	breakerThreshold = 3
+
+	// breakerBaseCooldown is the initial open duration. Doubles on each
+	// subsequent trip up to breakerMaxCooldown.
+	breakerBaseCooldown = 30 * time.Second
+	breakerMaxCooldown  = 30 * time.Minute
 )
 
 // publishItem is a single event that needs to be published to a set of relays.
-// Once at least one relay accepts the event, the item is removed from the
-// persistent queue (best-effort retries continue in-memory for remaining relays).
+// It carries no retry state of its own — retry timing is owned by the per-relay
+// circuit breaker. An item is persisted to SQLite only while !Delivered; once
+// any relay accepts it the row is deleted and remaining relays are best-effort
+// in memory.
 type publishItem struct {
-	// dbID is the database row ID (0 for in-memory-only items).
+	// dbID is the database row ID (0 once deleted / never persisted).
 	dbID int64
 	// Event is the signed Nostr event to publish.
 	Event gonostr.Event
-	// Relays is the full set of target relay URLs for this item.
-	Relays []string
-	// FailedRelays tracks which relays still need delivery.
-	FailedRelays []string
+	// Pending is the set of relay URLs that have not yet confirmed the event.
+	Pending map[string]struct{}
 	// Delivered is true once at least one relay accepted the event.
 	Delivered bool
-	// Attempts counts total publish rounds.
-	Attempts int
-	// NextRetry is when this item should next be attempted.
-	NextRetry time.Time
-	// CreatedAt records when the item was first enqueued.
+	// CreatedAt records when the item was first enqueued. Persisted, so
+	// age-based TTL works correctly across restarts.
 	CreatedAt time.Time
 }
 
 // publishQueue is an outbox that all publishes go through. A background
-// goroutine drains it, retrying with exponential backoff. Once at least
-// one relay per item accepts the event, the item is removed from the
-// persistent store but best-effort retries continue in-memory for
-// remaining relays.
+// goroutine drains it, grouping work by relay so a single dead relay
+// trips a shared circuit breaker instead of N independent per-item
+// backoff timers.
 type publishQueue struct {
-	mu           sync.Mutex
-	items        []*publishItem
-	flushWaiters []flushWaiter // released once attemptGen advances past their snapshot
-	attemptGen   uint64        // incremented on every drain pass that tries items
-	db           *DB
-	pool         *gonostr.Pool // set via setPool before calling run
-	wake         chan struct{} // signals the drain loop that new work arrived
+	mu       sync.Mutex
+	items    []*publishItem
+	breakers map[string]*relayBreaker
+
+	// flushWaiters is a test hook: released after a drain pass.
+	flushWaiters []flushWaiter
+	attemptGen   uint64
+
+	db   *DB
+	pool *gonostr.Pool // set via setPool before calling run
+	wake chan struct{} // signals the drain loop that new work arrived
 }
 
 // flushWaiter records a waiter and the generation it observed at Flush time.
@@ -72,7 +93,7 @@ func (q *publishQueue) Len() int {
 }
 
 // Flush blocks until at least one publish attempt pass has occurred since
-// the call to Flush. Intended for tests.
+// the call. Intended for tests.
 func (q *publishQueue) Flush(ctx context.Context) {
 	done := make(chan struct{})
 
@@ -90,8 +111,9 @@ func (q *publishQueue) Flush(ctx context.Context) {
 
 func newPublishQueue(ctx context.Context, db *DB) (*publishQueue, error) {
 	q := &publishQueue{
-		db:   db,
-		wake: make(chan struct{}, 1),
+		db:       db,
+		breakers: make(map[string]*relayBreaker),
+		wake:     make(chan struct{}, 1),
 	}
 
 	if err := q.load(ctx); err != nil {
@@ -107,46 +129,40 @@ func (q *publishQueue) setPool(pool *gonostr.Pool) {
 	q.pool = pool
 	q.mu.Unlock()
 
-	// Wake the drain loop in case items were loaded from disk.
 	if q.Len() > 0 {
 		q.signal()
 	}
 }
 
-// enqueue adds an event to be published to the given relays. The drain
-// goroutine will handle the actual publishing.
+// enqueue adds an event to be published to the given relays.
 func (q *publishQueue) enqueue(ctx context.Context, evt gonostr.Event, relays []string, label string) {
 	if len(relays) == 0 {
 		return
 	}
 
+	pending := make(map[string]struct{}, len(relays))
+	for _, r := range relays {
+		pending[r] = struct{}{}
+	}
+
 	item := &publishItem{
-		Event:        evt,
-		Relays:       relays,
-		FailedRelays: relays,
-		Delivered:    false,
-		Attempts:     0,
-		NextRetry:    time.Now(), // due immediately
-		CreatedAt:    time.Now(),
+		Event:     evt,
+		Pending:   pending,
+		CreatedAt: time.Now(),
 	}
 
 	q.mu.Lock()
 	q.items = append(q.items, item)
 
-	if err := q.insertItemLocked(ctx, item); err != nil {
-		// Item stays in memory for delivery this process lifetime,
-		// but won't survive a crash.
+	if err := q.insertItemLocked(ctx, item, relays); err != nil {
+		// Stays in memory for this process lifetime but won't survive a crash.
 		slog.Warn("nostr: failed to persist publish queue item",
 			"label", label, "error", err)
 	}
-
 	q.mu.Unlock()
 
 	slog.Debug("nostr: enqueued for publish",
-		"label", label,
-		"relays", len(relays),
-		"event_kind", evt.Kind,
-	)
+		"label", label, "relays", len(relays), "event_kind", evt.Kind)
 
 	q.signal()
 }
@@ -159,40 +175,286 @@ func (q *publishQueue) signal() {
 	}
 }
 
-// drainOnce processes all items that are due. Returns the time until the
-// next item is due, or 0 if nothing is pending.
+// run drains the queue until ctx is cancelled. Sleeps when idle, wakes on
+// new enqueues or when a breaker cooldown expires.
+func (q *publishQueue) run(ctx context.Context) {
+	for {
+		nextWake := q.drainOnce(ctx)
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		if nextWake > 0 {
+			timer := time.NewTimer(nextWake)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+
+				return
+			case <-q.wake:
+				timer.Stop()
+			case <-timer.C:
+			}
+		} else if q.Len() == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-q.wake:
+			}
+		}
+		// else: work remains and no sleep needed, loop immediately.
+	}
+}
+
+// drainOnce processes all items against relays whose breaker permits
+// traffic. Returns how long to sleep before the next useful wakeup.
 func (q *publishQueue) drainOnce(ctx context.Context) time.Duration {
+	now := time.Now()
+
 	q.mu.Lock()
-	due, nextWake := q.collectDueLocked()
+	q.evictLocked(ctx, now)
+	work, probes := q.collectWorkLocked(now)
 	q.mu.Unlock()
 
-	if len(due) == 0 {
-		return nextWake
-	}
+	for relay, items := range work {
+		if ctx.Err() != nil {
+			// Shutdown in progress — don't trip breakers or log noise.
+			// Reset any half-open breakers we transitioned above so they
+			// aren't stuck (defensive: state is in-mem so dies with us,
+			// but keeps invariants clean for tests).
+			q.mu.Lock()
+			for r := range probes {
+				if b := q.breakers[r]; b != nil && b.state == halfOpen {
+					b.state = open
+				}
+			}
+			q.mu.Unlock()
 
-	for _, item := range due {
-		q.tryItem(ctx, item)
+			break
+		}
+
+		_, isProbe := probes[relay]
+		q.publishBatch(ctx, relay, items, isProbe)
 	}
 
 	q.mu.Lock()
 	q.attemptGen++
-	q.cleanupLocked(ctx)
+	q.evictLocked(ctx, time.Now())
+	q.gcBreakersLocked()
+	next := q.nextWakeLocked(time.Now())
 	q.mu.Unlock()
 
 	q.notifyFlush()
 
-	// Re-check for the next wake time after cleanup.
-	q.mu.Lock()
-	_, nextWake = q.collectDueLocked()
-	q.mu.Unlock()
-
-	return nextWake
+	return next
 }
 
-// notifyFlush releases flush waiters whose snapshot generation has been
-// surpassed by the current attemptGen.
+// collectWorkLocked groups pending items by relay, consulting each relay's
+// circuit breaker. Half-open breakers get at most one item (the probe).
+// Must be called with q.mu held.
+func (q *publishQueue) collectWorkLocked(now time.Time) (map[string][]*publishItem, map[string]struct{}) {
+	work := make(map[string][]*publishItem)
+	probes := make(map[string]struct{})
+
+	for _, item := range q.items {
+		for relay := range item.Pending {
+			b := q.breakerLocked(relay)
+
+			switch b.allow(now) {
+			case allowAll:
+				work[relay] = append(work[relay], item)
+			case allowProbe:
+				if _, already := probes[relay]; !already {
+					work[relay] = append(work[relay], item)
+					probes[relay] = struct{}{}
+				}
+			case deny:
+				// skip
+			}
+		}
+	}
+
+	return work, probes
+}
+
+// publishBatch sends all items to one relay over a single connection.
+// Updates item and breaker state on completion.
+func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items []*publishItem, probe bool) {
+	conn, err := q.pool.EnsureRelay(relayURL)
+	if err != nil {
+		slog.Log(ctx, probeLevel(probe), "nostr: relay connect failed",
+			"relay", relayURL, "error", err)
+
+		q.mu.Lock()
+		q.breakerLocked(relayURL).onFailure(time.Now())
+		q.mu.Unlock()
+
+		return
+	}
+
+	var anyOK bool
+
+	for _, item := range items {
+		if ctx.Err() != nil {
+			return // shutdown; don't touch breaker
+		}
+
+		// Per-event timeout so large batches don't starve the tail.
+		pubCtx, cancel := context.WithTimeout(ctx, publishTimeout)
+		err := conn.Publish(pubCtx, item.Event)
+
+		cancel()
+
+		if err != nil {
+			// Per-event rejection (e.g. rate limit, content filter)
+			// doesn't mean the relay is dead — don't trip breaker here.
+			slog.Log(ctx, probeLevel(probe), "nostr: publish failed",
+				"relay", relayURL,
+				"event_id", item.Event.ID.Hex(),
+				"event_kind", item.Event.Kind,
+				"error", err,
+			)
+
+			continue
+		}
+
+		anyOK = true
+
+		slog.Info("nostr: published",
+			"relay", relayURL,
+			"event_id", item.Event.ID.Hex(),
+			"event_kind", item.Event.Kind,
+		)
+
+		q.mu.Lock()
+		delete(item.Pending, relayURL)
+
+		if !item.Delivered {
+			item.Delivered = true
+
+			if item.dbID != 0 {
+				if err := q.deleteItemLocked(ctx, item.dbID); err != nil {
+					slog.Warn("nostr: failed to remove delivered item from db",
+						"event_id", item.Event.ID.Hex(), "error", err)
+				} else {
+					item.dbID = 0
+				}
+			}
+		}
+		q.mu.Unlock()
+	}
+
+	q.mu.Lock()
+	if anyOK {
+		q.breakerLocked(relayURL).onSuccess()
+	} else {
+		// Connected but every event failed — treat as a relay-level
+		// problem (auth required, write restricted, etc.).
+		q.breakerLocked(relayURL).onFailure(time.Now())
+	}
+	q.mu.Unlock()
+}
+
+// evictLocked drops items that have completed or exceeded their TTL.
+// Must be called with q.mu held.
+func (q *publishQueue) evictLocked(ctx context.Context, now time.Time) {
+	q.items = slices.DeleteFunc(q.items, func(item *publishItem) bool {
+		age := now.Sub(item.CreatedAt)
+
+		switch {
+		case len(item.Pending) == 0:
+			// Fully delivered. dbID should already be 0 but be defensive.
+			if item.dbID != 0 {
+				_ = q.deleteItemLocked(ctx, item.dbID)
+			}
+
+			return true
+
+		case item.Delivered && age > ttlDelivered:
+			// On the network already; give up on stragglers.
+			slog.Debug("nostr: dropping best-effort retries",
+				"event_id", item.Event.ID.Hex(),
+				"age", age.Round(time.Second),
+				"pending_relays", slices.Collect(maps.Keys(item.Pending)),
+			)
+
+			return true
+
+		case !item.Delivered && age > ttlUndelivered:
+			// Data loss. Shout about it.
+			slog.Warn("nostr: DROPPING undelivered event past TTL",
+				"event_id", item.Event.ID.Hex(),
+				"age", age.Round(time.Second),
+				"pending_relays", slices.Collect(maps.Keys(item.Pending)),
+			)
+
+			if item.dbID != 0 {
+				if err := q.deleteItemLocked(ctx, item.dbID); err != nil {
+					slog.Warn("nostr: failed to delete expired item from db",
+						"event_id", item.Event.ID.Hex(), "error", err)
+
+					return false // keep so we retry the delete
+				}
+			}
+
+			return true
+		}
+
+		return false
+	})
+}
+
+// nextWakeLocked returns how long until the next breaker re-opens for
+// probing, or 0 if nothing is pending. Must be called with q.mu held.
+func (q *publishQueue) nextWakeLocked(now time.Time) time.Duration {
+	if len(q.items) == 0 {
+		return 0
+	}
+
+	// Which relays do we still care about?
+	wanted := make(map[string]struct{})
+
+	for _, item := range q.items {
+		for r := range item.Pending {
+			wanted[r] = struct{}{}
+		}
+	}
+
+	var earliest time.Time
+
+	for relay := range wanted {
+		b := q.breakerLocked(relay)
+		if b.state != open {
+			// Closed or half-open means work is possible now — but we
+			// just drained, so if it's still pending it means half-open
+			// probe is in flight or we're mid-loop. Let the caller
+			// decide via Len(); return 0 means "don't sleep long".
+			return breakerBaseCooldown // conservative short nap
+		}
+
+		if earliest.IsZero() || b.nextProbe.Before(earliest) {
+			earliest = b.nextProbe
+		}
+	}
+
+	if earliest.IsZero() {
+		return 0
+	}
+
+	d := earliest.Sub(now)
+	if d < 0 {
+		return 0
+	}
+
+	return d
+}
+
+// notifyFlush releases test waiters whose generation has been surpassed.
 func (q *publishQueue) notifyFlush() {
 	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	gen := q.attemptGen
 
 	var remaining []flushWaiter
@@ -206,162 +468,129 @@ func (q *publishQueue) notifyFlush() {
 	}
 
 	q.flushWaiters = remaining
-	q.mu.Unlock()
 }
 
-// collectDueLocked returns items whose NextRetry has passed, and the
-// duration until the next earliest retry (0 if nothing pending).
+// --- circuit breaker ---
+
+type breakerState int
+
+const (
+	closed breakerState = iota
+	open
+	halfOpen
+)
+
+type allowResult int
+
+const (
+	deny allowResult = iota
+	allowProbe
+	allowAll
+)
+
+// relayBreaker is a classic three-state circuit breaker tracking one relay's
+// health. It owns all retry timing — items have none. Not persisted: on
+// restart we re-probe everything, which is cheap and self-healing.
+type relayBreaker struct {
+	state     breakerState
+	failures  int
+	cooldown  time.Duration
+	nextProbe time.Time
+}
+
+func (b *relayBreaker) allow(now time.Time) allowResult {
+	switch b.state {
+	case closed:
+		return allowAll
+	case open:
+		if !now.Before(b.nextProbe) {
+			b.state = halfOpen
+
+			return allowProbe
+		}
+
+		return deny
+	case halfOpen:
+		return deny // a probe is already scheduled this pass
+	}
+
+	return deny
+}
+
+func (b *relayBreaker) onSuccess() {
+	if b.state != closed {
+		slog.Info("nostr: relay recovered", "cooldown_was", b.cooldown)
+	}
+
+	b.state = closed
+	b.failures = 0
+	b.cooldown = breakerBaseCooldown
+}
+
+func (b *relayBreaker) onFailure(now time.Time) {
+	b.failures++
+
+	wasOpen := b.state == open || b.state == halfOpen
+
+	if b.state == halfOpen || b.failures >= breakerThreshold {
+		if wasOpen {
+			// Re-trip after a failed probe: escalate.
+			b.cooldown = min(b.cooldown*2, breakerMaxCooldown)
+		} else {
+			// First trip from closed: start at base.
+			b.cooldown = breakerBaseCooldown
+		}
+
+		b.state = open
+		b.nextProbe = now.Add(b.cooldown)
+
+		slog.Warn("nostr: relay breaker open",
+			"failures", b.failures, "cooldown", b.cooldown)
+	}
+}
+
+// breakerLocked returns the breaker for a relay, creating it if needed.
 // Must be called with q.mu held.
-func (q *publishQueue) collectDueLocked() ([]*publishItem, time.Duration) {
-	now := time.Now()
+func (q *publishQueue) breakerLocked(relay string) *relayBreaker {
+	b, ok := q.breakers[relay]
+	if !ok {
+		b = &relayBreaker{state: closed}
+		q.breakers[relay] = b
+	}
 
-	var due []*publishItem
+	return b
+}
 
-	var earliest time.Time
+// gcBreakersLocked drops breaker entries for relays no item references.
+// Prevents unbounded map growth when relay sets change over time.
+// Must be called with q.mu held.
+func (q *publishQueue) gcBreakersLocked() {
+	wanted := make(map[string]struct{})
 
 	for _, item := range q.items {
-		if !item.NextRetry.After(now) {
-			due = append(due, item)
-		} else if earliest.IsZero() || item.NextRetry.Before(earliest) {
-			earliest = item.NextRetry
+		for r := range item.Pending {
+			wanted[r] = struct{}{}
 		}
 	}
 
-	if len(due) > 0 || earliest.IsZero() {
-		return due, 0
+	for r, b := range q.breakers {
+		// Keep open breakers even if no item wants them right now —
+		// a new enqueue to the same dead relay should inherit the
+		// cooldown, not start fresh.
+		if _, ok := wanted[r]; !ok && b.state == closed {
+			delete(q.breakers, r)
+		}
 	}
-
-	return nil, time.Until(earliest)
 }
 
-// tryItem attempts to publish the event to its remaining failed relays.
-func (q *publishQueue) tryItem(ctx context.Context, item *publishItem) {
-	var (
-		stillFailed []string
-		delivered   bool
-	)
-
-	for _, relayURL := range item.FailedRelays {
-		if err := q.publishToRelay(ctx, relayURL, item.Event); err != nil {
-			logLevel := slog.LevelWarn
-			if item.Attempts == 0 {
-				// First attempt failures are common (e.g. relay down),
-				// don't spam warnings for the initial try.
-				logLevel = slog.LevelDebug
-			}
-
-			slog.Log(ctx, logLevel, "nostr: publish failed",
-				"relay", relayURL,
-				"event_id", item.Event.ID.Hex(),
-				"event_kind", item.Event.Kind,
-				"attempt", item.Attempts+1,
-				"error", err,
-			)
-
-			stillFailed = append(stillFailed, relayURL)
-		} else {
-			slog.Info("nostr: published",
-				"relay", relayURL,
-				"event_id", item.Event.ID.Hex(),
-				"event_kind", item.Event.Kind,
-				"attempt", item.Attempts+1,
-			)
-
-			delivered = true
-		}
+// probeLevel returns Debug for half-open probes (expected to fail often)
+// and Warn otherwise.
+func probeLevel(probe bool) slog.Level {
+	if probe {
+		return slog.LevelDebug
 	}
 
-	q.mu.Lock()
-	item.Delivered = item.Delivered || delivered
-	item.FailedRelays = stillFailed
-	item.Attempts++
-	item.NextRetry = time.Now().Add(calcBackoff(item.Attempts))
-
-	// Once delivered, remove from persistent storage but keep in memory
-	// for best-effort retries to remaining relays.
-	if item.Delivered && item.dbID != 0 {
-		if err := q.deleteItemLocked(ctx, item.dbID); err != nil {
-			slog.Warn("nostr: failed to remove delivered item from db, will retry",
-				"event_id", item.Event.ID.Hex(), "error", err)
-		} else {
-			item.dbID = 0
-		}
-	}
-
-	q.mu.Unlock()
-}
-
-// publishToRelay connects to a relay and publishes an event with a timeout.
-func (q *publishQueue) publishToRelay(ctx context.Context, relayURL string, evt gonostr.Event) error {
-	pubCtx, cancel := context.WithTimeout(ctx, publishTimeout)
-	defer cancel()
-
-	relay, err := q.pool.EnsureRelay(relayURL)
-	if err != nil {
-		return fmt.Errorf("connecting to relay: %w", err)
-	}
-
-	if err := relay.Publish(pubCtx, evt); err != nil {
-		return fmt.Errorf("publishing event: %w", err)
-	}
-
-	return nil
-}
-
-// cleanupLocked removes items that have no remaining failed relays.
-// Must be called with q.mu held.
-func (q *publishQueue) cleanupLocked(ctx context.Context) {
-	q.items = slices.DeleteFunc(q.items, func(item *publishItem) bool {
-		if len(item.FailedRelays) == 0 {
-			if item.dbID != 0 {
-				if err := q.deleteItemLocked(ctx, item.dbID); err != nil {
-					slog.Warn("nostr: failed to remove completed item from db",
-						"event_id", item.Event.ID.Hex(), "error", err)
-
-					return false // keep in memory so we retry the delete
-				}
-			}
-
-			return true
-		}
-
-		return false
-	})
-}
-
-// run drains the queue until ctx is cancelled. It sleeps when idle and
-// wakes on new enqueues or when the next retry is due.
-func (q *publishQueue) run(ctx context.Context) {
-	for {
-		nextWake := q.drainOnce(ctx)
-
-		if ctx.Err() != nil {
-			return
-		}
-
-		if nextWake > 0 {
-			// Sleep until the next retry is due or new work arrives.
-			timer := time.NewTimer(nextWake)
-
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-
-				return
-			case <-q.wake:
-				timer.Stop()
-			case <-timer.C:
-			}
-		} else if q.Len() == 0 {
-			// Nothing pending — sleep until woken.
-			select {
-			case <-ctx.Done():
-				return
-			case <-q.wake:
-			}
-		}
-		// else: items are due right now, loop immediately.
-	}
+	return slog.LevelWarn
 }
 
 // --- persistence ---
@@ -381,20 +610,23 @@ func (q *publishQueue) load(ctx context.Context) error {
 		}
 
 		relays := strings.Split(row.Relays, "\n")
+		pending := make(map[string]struct{}, len(relays))
 
-		relays = slices.DeleteFunc(relays, func(s string) bool {
-			return strings.TrimSpace(s) == ""
-		})
-		if len(relays) == 0 {
+		for _, r := range relays {
+			if r = strings.TrimSpace(r); r != "" {
+				pending[r] = struct{}{}
+			}
+		}
+
+		if len(pending) == 0 {
 			continue
 		}
 
 		q.items = append(q.items, &publishItem{
-			dbID:         row.ID,
-			Event:        evt,
-			Relays:       relays,
-			FailedRelays: relays,
-			CreatedAt:    time.Unix(row.CreatedAt, 0),
+			dbID:      row.ID,
+			Event:     evt,
+			Pending:   pending,
+			CreatedAt: time.Unix(row.CreatedAt, 0),
 		})
 	}
 
@@ -405,9 +637,8 @@ func (q *publishQueue) load(ctx context.Context) error {
 	return nil
 }
 
-// insertItemLocked persists a new item to the database.
-// Must be called with q.mu held.
-func (q *publishQueue) insertItemLocked(ctx context.Context, item *publishItem) error {
+// insertItemLocked persists a new item. Must be called with q.mu held.
+func (q *publishQueue) insertItemLocked(ctx context.Context, item *publishItem, relays []string) error {
 	eventJSON, err := item.Event.MarshalJSON()
 	if err != nil {
 		return fmt.Errorf("marshalling event: %w", err)
@@ -415,7 +646,7 @@ func (q *publishQueue) insertItemLocked(ctx context.Context, item *publishItem) 
 
 	id, err := q.db.queries.InsertPublishItem(ctx, InsertPublishItemParams{
 		EventJson: string(eventJSON),
-		Relays:    strings.Join(item.Relays, "\n"),
+		Relays:    strings.Join(relays, "\n"),
 		CreatedAt: item.CreatedAt.Unix(),
 	})
 	if err != nil {
@@ -427,23 +658,11 @@ func (q *publishQueue) insertItemLocked(ctx context.Context, item *publishItem) 
 	return nil
 }
 
-// deleteItemLocked removes a single item from the database.
-// Returns an error if the deletion fails so callers can retain
-// the in-memory state for retry.
+// deleteItemLocked removes one row. Must be called with q.mu held.
 func (q *publishQueue) deleteItemLocked(ctx context.Context, dbID int64) error {
 	if err := q.db.queries.DeletePublishItem(ctx, dbID); err != nil {
 		return fmt.Errorf("deleting publish queue item %d: %w", dbID, err)
 	}
 
 	return nil
-}
-
-// calcBackoff returns the backoff duration for the given attempt number.
-func calcBackoff(attempts int) time.Duration {
-	d := float64(initialBackoff) * math.Pow(backoffMultiplier, float64(attempts-1))
-	if d > float64(maxBackoff) {
-		return maxBackoff
-	}
-
-	return time.Duration(d)
 }
