@@ -2,9 +2,10 @@
   lib,
   buildGoModule,
 }:
-buildGoModule {
+buildGoModule (finalAttrs: {
   pname = "opencrow";
   version = "0.3.0";
+  ldflags = [ "-X main.version=${finalAttrs.version}" ];
   src = lib.fileset.toSource {
     root = ./..;
     fileset = lib.fileset.unions [
@@ -39,4 +40,4 @@ buildGoModule {
     homepage = "https://github.com/pinpox/opencrow";
     mainProgram = "opencrow";
   };
-}
+})

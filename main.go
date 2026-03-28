@@ -30,6 +30,11 @@ const (
 var dbSchema string
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
+		fmt.Fprintln(os.Stdout, versionString())
+		os.Exit(0)
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: parseLogLevel(os.Getenv("OPENCROW_LOG_LEVEL")),
 		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
