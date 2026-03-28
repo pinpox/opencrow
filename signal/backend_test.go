@@ -1,4 +1,3 @@
-//nolint:revive // package name intentionally mirrors backend name.
 package signal
 
 import (

@@ -28,6 +28,13 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      # revive attributes this package-level finding to one file chosen
+      # non-deterministically, so //nolint directives cannot silence it
+      # reliably once a package has more than a couple of source files.
+      - linters: [revive]
+        text: "var-naming: avoid package names that conflict with Go standard library"
+        path: ^signal/
     paths:
       - third_party$
       - builtin$
