@@ -68,11 +68,11 @@ type Backend interface {
 
 // NewWorker creates a new worker. The pi process is started lazily on first dequeue.
 // app and be are set after construction via SetApp/SetBackend (two-phase init).
-func NewWorker(inbox *InboxStore, piCfg PiConfig, hbCfg HeartbeatConfig, triggerPrompt string) *Worker {
+func NewWorker(inbox *InboxStore, piCfg PiConfig, hbPrompt, triggerPrompt string) *Worker {
 	return &Worker{
 		inbox:           inbox,
 		piCfg:           piCfg,
-		hbPrompt:        hbCfg.Prompt,
+		hbPrompt:        hbPrompt,
 		triggerPrompt:   triggerPrompt,
 		lastUse:         time.Now(),
 		currentPriority: -1,

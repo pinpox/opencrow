@@ -177,7 +177,7 @@ func migrateLegacyOutbox(ctx context.Context, db *sql.DB, sessionDir string) err
 // wireServices creates backend, app, and worker using two-phase init.
 func wireServices(ctx context.Context, cfg *Config, db *sql.DB, inbox *InboxStore) (backend.Backend, *Worker, error) { //nolint:ireturn // factory returns interface by design
 	// Phase 1: create objects with nil cross-references.
-	worker := NewWorker(inbox, cfg.Pi, cfg.Heartbeat, defaultTriggerPrompt)
+	worker := NewWorker(inbox, cfg.Pi, cfg.Heartbeat.Prompt, defaultTriggerPrompt)
 
 	var app *App
 

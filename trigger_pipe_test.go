@@ -35,7 +35,7 @@ func TestTriggerPipeReader_EnqueuesLines(t *testing.T) {
 
 	dir := t.TempDir()
 
-	worker := NewWorker(inbox, PiConfig{SessionDir: dir}, HeartbeatConfig{}, "")
+	worker := NewWorker(inbox, PiConfig{SessionDir: dir}, "", "")
 	startTriggerPipe(ctx, worker, dir)
 
 	pipePath := TriggerPipePath(dir)

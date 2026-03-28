@@ -85,7 +85,7 @@ func TestWorker_PreemptsLowerPriority(t *testing.T) {
 	ctx := context.Background()
 	inbox := newTestInbox(ctx, t)
 
-	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, HeartbeatConfig{}, "")
+	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, "", "")
 
 	// Simulate a heartbeat running by setting worker state directly.
 	cancelled := make(chan struct{})
@@ -112,7 +112,7 @@ func TestWorker_NoPreemptSamePriority(t *testing.T) {
 	ctx := context.Background()
 	inbox := newTestInbox(ctx, t)
 
-	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, HeartbeatConfig{}, "")
+	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, "", "")
 
 	preempted := false
 
@@ -247,7 +247,7 @@ func TestWorker_MergeUserItems(t *testing.T) {
 	ctx := context.Background()
 	inbox := newTestInbox(ctx, t)
 
-	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, HeartbeatConfig{}, "")
+	worker := NewWorker(inbox, PiConfig{SessionDir: t.TempDir()}, "", "")
 
 	// Enqueue extra user messages that mergeUserItems should fold in.
 	must(t, inbox.Enqueue(ctx, PriorityUser, sourceUser, "second", "reply-2"))
