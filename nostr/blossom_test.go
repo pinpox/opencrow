@@ -65,6 +65,7 @@ func TestSendFile_UploadsToBlossom(t *testing.T) {
 	t.Parallel()
 
 	plaintext := []byte("fake image data")
+
 	var receivedBody []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

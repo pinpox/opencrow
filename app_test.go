@@ -312,6 +312,7 @@ func TestFormatToolCall(t *testing.T) {
 
 	check := func(evt ToolCallEvent, flavor backend.MarkdownFlavor, want string) {
 		t.Helper()
+
 		if got := formatToolCall(evt, flavor); got != want {
 			t.Errorf("formatToolCall(%s, %d) = %q, want %q", evt.ToolName, flavor, got, want)
 		}

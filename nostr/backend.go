@@ -240,7 +240,7 @@ func (b *Backend) SendFile(ctx context.Context, conversationID string, filePath 
 	}
 
 	if b.kr == nil {
-		return fmt.Errorf("SendFile called before Run()")
+		return errors.New("SendFile called before Run()")
 	}
 
 	tags := gonostr.Tags{
