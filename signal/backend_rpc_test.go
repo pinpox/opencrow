@@ -345,6 +345,47 @@ done
 	return binPath
 }
 
+// runTestSetup wires up a fake daemon + backend + collector, starts
+// autoRespond and the receive loop, and returns everything needed to
+// drive and assert. This collapses the ~15 lines of identical setup
+// that every TestRun_* function was repeating.
+type runTestSetup struct {
+	fake   *fakeSignalDaemon
+	mc     *messageCollector
+	b      *Backend
+	cancel context.CancelFunc
+	done   <-chan error
+}
+
+func newRunTest(t *testing.T, allowedUsers map[string]struct{}) *runTestSetup {
+	t.Helper()
+
+	fake := newFakeSignalDaemon(t)
+	mc := &messageCollector{}
+	b := newTestBackend(t, fake, allowedUsers, mc.handler)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+	go fake.autoRespond(ctx, nil)
+
+	done := make(chan error, 1)
+
+	go func() { done <- runReceiveLoop(ctx, b) }()
+
+	time.Sleep(100 * time.Millisecond)
+
+	return &runTestSetup{fake: fake, mc: mc, b: b, cancel: cancel, done: done}
+}
+
+// stop cancels the run and waits for the loop to exit, then returns
+// all collected messages.
+func (s *runTestSetup) stop() []backend.Message {
+	s.cancel()
+	<-s.done
+
+	return s.mc.get()
+}
+
 // newTestBackend wires up a Backend that connects to the given fake daemon
 // socket. It bypasses the real daemon startup by directly connecting.
 func newTestBackend(t *testing.T, fake *fakeSignalDaemon, allowedUsers map[string]struct{}, handler backend.MessageHandler) *Backend {
@@ -438,28 +479,12 @@ func runReceiveLoop(ctx context.Context, b *Backend) error {
 func TestRun_ReceivesDirectMessage(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
+	s := newRunTest(t, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	s.fake.pushReceive(makeEnvelope("+49222", "hello bot", 1700000000100, nil))
+	waitForMessages(t, s.mc, 1)
 
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
-
-	fake.pushReceive(makeEnvelope("+49222", "hello bot", 1700000000100, nil))
-	waitForMessages(t, mc, 1)
-
-	cancel()
-	<-runDone
-
-	msgs := mc.get()
+	msgs := s.stop()
 	if len(msgs) != 1 {
 		t.Fatalf("got %d messages, want 1", len(msgs))
 	}
@@ -484,30 +509,14 @@ func TestRun_ReceivesDirectMessage(t *testing.T) {
 func TestRun_ReceivesGroupMessage(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
+	s := newRunTest(t, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
-
-	fake.pushReceive(makeEnvelope("+49222", "group msg", 1700000000200, map[string]any{
+	s.fake.pushReceive(makeEnvelope("+49222", "group msg", 1700000000200, map[string]any{
 		"groupInfo": map[string]any{"groupId": "GRP123="},
 	}))
-	waitForMessages(t, mc, 1)
+	waitForMessages(t, s.mc, 1)
 
-	cancel()
-	<-runDone
-
-	msgs := mc.get()
+	msgs := s.stop()
 	if msgs[0].ConversationID != "signal-group:GRP123=" {
 		t.Errorf("ConversationID = %q, want signal-group:GRP123=", msgs[0].ConversationID)
 	}
@@ -516,33 +525,16 @@ func TestRun_ReceivesGroupMessage(t *testing.T) {
 func TestRun_DropsDisallowedUser(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	allowed := map[string]struct{}{"+49222": {}}
-	b := newTestBackend(t, fake, allowed, mc.handler)
+	s := newRunTest(t, map[string]struct{}{"+49222": {}})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
-
-	fake.pushReceive(makeEnvelope("+49333", "should be dropped", 1700000000300, nil))
+	s.fake.pushReceive(makeEnvelope("+49333", "should be dropped", 1700000000300, nil))
 	time.Sleep(200 * time.Millisecond)
 
-	fake.pushReceive(makeEnvelope("+49222", "should arrive", 1700000000301, nil))
-	waitForMessages(t, mc, 1)
+	s.fake.pushReceive(makeEnvelope("+49222", "should arrive", 1700000000301, nil))
+	waitForMessages(t, s.mc, 1)
 	time.Sleep(200 * time.Millisecond)
 
-	cancel()
-	<-runDone
-
-	msgs := mc.get()
+	msgs := s.stop()
 	if len(msgs) != 1 {
 		t.Fatalf("got %d messages, want 1", len(msgs))
 	}
@@ -555,66 +547,36 @@ func TestRun_DropsDisallowedUser(t *testing.T) {
 func TestRun_DropsSelfMessages(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
+	s := newRunTest(t, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
-
-	fake.pushReceive(makeEnvelope("+49111", "self echo", 1700000000400, nil))
+	s.fake.pushReceive(makeEnvelope("+49111", "self echo", 1700000000400, nil))
 	time.Sleep(300 * time.Millisecond)
 
-	cancel()
-	<-runDone
+	s.stop()
 
-	if mc.count() != 0 {
-		t.Fatalf("got %d messages, want 0 (self-messages dropped)", mc.count())
+	if s.mc.count() != 0 {
+		t.Fatalf("got %d messages, want 0 (self-messages dropped)", s.mc.count())
 	}
 }
 
 func TestRun_SingleActiveConversation(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
+	s := newRunTest(t, nil)
 
 	// First message claims conversation with +49222.
-	fake.pushReceive(makeEnvelope("+49222", "from A", 1700000000500, nil))
-	waitForMessages(t, mc, 1)
+	s.fake.pushReceive(makeEnvelope("+49222", "from A", 1700000000500, nil))
+	waitForMessages(t, s.mc, 1)
 
 	// Second message from different user — should be dropped.
-	fake.pushReceive(makeEnvelope("+49333", "from B", 1700000000501, nil))
+	s.fake.pushReceive(makeEnvelope("+49333", "from B", 1700000000501, nil))
 	time.Sleep(200 * time.Millisecond)
 
 	// Third from same conversation — should arrive.
-	fake.pushReceive(makeEnvelope("+49222", "from A again", 1700000000502, nil))
-	waitForMessages(t, mc, 2)
+	s.fake.pushReceive(makeEnvelope("+49222", "from A again", 1700000000502, nil))
+	waitForMessages(t, s.mc, 2)
 
-	cancel()
-	<-runDone
-
-	msgs := mc.get()
+	msgs := s.stop()
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2", len(msgs))
 	}
@@ -627,36 +589,20 @@ func TestRun_SingleActiveConversation(t *testing.T) {
 func TestRun_ResetConversationUnlocks(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
+	s := newRunTest(t, nil)
 
 	// Claim +49222.
-	fake.pushReceive(makeEnvelope("+49222", "first", 1700000000600, nil))
-	waitForMessages(t, mc, 1)
+	s.fake.pushReceive(makeEnvelope("+49222", "first", 1700000000600, nil))
+	waitForMessages(t, s.mc, 1)
 
 	// Reset.
-	b.ResetConversation(ctx, "+49222")
+	s.b.ResetConversation(context.Background(), "+49222")
 
 	// Now +49333 should succeed.
-	fake.pushReceive(makeEnvelope("+49333", "second", 1700000000601, nil))
-	waitForMessages(t, mc, 2)
+	s.fake.pushReceive(makeEnvelope("+49333", "second", 1700000000601, nil))
+	waitForMessages(t, s.mc, 2)
 
-	cancel()
-	<-runDone
-
-	msgs := mc.get()
+	msgs := s.stop()
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2", len(msgs))
 	}
@@ -669,33 +615,17 @@ func TestRun_ResetConversationUnlocks(t *testing.T) {
 func TestRun_ReceivesAttachments(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
-	b.cfg.ConfigDir = "/var/lib/signal"
+	s := newRunTest(t, nil)
+	s.b.cfg.ConfigDir = "/var/lib/signal"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
-
-	fake.pushReceive(makeEnvelope("+49222", "check this", 1700000000700, map[string]any{
+	s.fake.pushReceive(makeEnvelope("+49222", "check this", 1700000000700, map[string]any{
 		"attachments": []any{
 			map[string]any{"filename": "photo.jpg", "contentType": "image/jpeg"},
 		},
 	}))
-	waitForMessages(t, mc, 1)
+	waitForMessages(t, s.mc, 1)
 
-	cancel()
-	<-runDone
-
-	msgs := mc.get()
+	msgs := s.stop()
 	if !strings.Contains(msgs[0].Text, "check this") {
 		t.Errorf("missing message body in %q", msgs[0].Text)
 	}
@@ -712,55 +642,27 @@ func TestRun_ReceivesAttachments(t *testing.T) {
 func TestRun_AttachmentOnlyMessage(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
-	b.cfg.ConfigDir = "/data"
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
+	s := newRunTest(t, nil)
+	s.b.cfg.ConfigDir = "/data"
 
 	// No "message" field — attachment only.
-	fake.pushReceive(makeEnvelope("+49222", "", 1700000000800, map[string]any{
+	s.fake.pushReceive(makeEnvelope("+49222", "", 1700000000800, map[string]any{
 		"attachments": []any{
 			map[string]any{"filename": "voice.ogg", "contentType": "audio/ogg"},
 		},
 	}))
-	waitForMessages(t, mc, 1)
+	waitForMessages(t, s.mc, 1)
 
-	cancel()
-	<-runDone
-
-	if !strings.Contains(mc.get()[0].Text, "voice.ogg") {
-		t.Errorf("expected attachment text, got %q", mc.get()[0].Text)
+	msgs := s.stop()
+	if !strings.Contains(msgs[0].Text, "voice.ogg") {
+		t.Errorf("expected attachment text, got %q", msgs[0].Text)
 	}
 }
 
 func TestRun_WrappedSubscriptionPayload(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
+	s := newRunTest(t, nil)
 
 	// Signal-cli wraps subscription notifications in {"subscription":N,"result":{...}}.
 	wrapped := map[string]any{
@@ -776,45 +678,28 @@ func TestRun_WrappedSubscriptionPayload(t *testing.T) {
 			},
 		},
 	}
-	fake.pushReceive(wrapped)
-	waitForMessages(t, mc, 1)
+	s.fake.pushReceive(wrapped)
+	waitForMessages(t, s.mc, 1)
 
-	cancel()
-	<-runDone
-
-	if mc.get()[0].Text != "wrapped msg" {
-		t.Errorf("Text = %q, want %q", mc.get()[0].Text, "wrapped msg")
+	msgs := s.stop()
+	if msgs[0].Text != "wrapped msg" {
+		t.Errorf("Text = %q, want %q", msgs[0].Text, "wrapped msg")
 	}
 }
 
 func TestRun_QuoteReply(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSignalDaemon(t)
-	mc := &messageCollector{}
-	b := newTestBackend(t, fake, nil, mc.handler)
+	s := newRunTest(t, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go fake.autoRespond(ctx, nil)
-
-	runDone := make(chan error, 1)
-
-	go func() { runDone <- runReceiveLoop(ctx, b) }()
-
-	time.Sleep(100 * time.Millisecond)
-
-	fake.pushReceive(makeEnvelope("+49222", "replying", 1700000001000, map[string]any{
+	s.fake.pushReceive(makeEnvelope("+49222", "replying", 1700000001000, map[string]any{
 		"quote": map[string]any{"id": 1699999999000},
 	}))
-	waitForMessages(t, mc, 1)
+	waitForMessages(t, s.mc, 1)
 
-	cancel()
-	<-runDone
-
-	if mc.get()[0].ReplyToID != "1699999999000" {
-		t.Errorf("ReplyToID = %q, want 1699999999000", mc.get()[0].ReplyToID)
+	msgs := s.stop()
+	if msgs[0].ReplyToID != "1699999999000" {
+		t.Errorf("ReplyToID = %q, want 1699999999000", msgs[0].ReplyToID)
 	}
 }
 
