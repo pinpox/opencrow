@@ -882,25 +882,7 @@ func sendTestDMWithTags(ctx context.Context, t *testing.T, wsURL string, senderS
 // sendTestDM sends a NIP-17 gift-wrapped DM from sender to recipient via the relay.
 func sendTestDM(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, content string) {
 	t.Helper()
-
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
-	defer pool.Close("test done")
-
-	kr := keyer.NewPlainKeySigner(senderSK)
-
-	_, toThem, err := nip17.PrepareMessage(ctx, content, nil, kr, recipientPK, nil)
-	if err != nil {
-		t.Fatalf("preparing DM: %v", err)
-	}
-
-	relay, err := pool.EnsureRelay(wsURL)
-	if err != nil {
-		t.Fatalf("connecting to relay: %v", err)
-	}
-
-	if err := relay.Publish(ctx, toThem); err != nil {
-		t.Fatalf("publishing gift wrap: %v", err)
-	}
+	sendTestDMWithTags(ctx, t, wsURL, senderSK, recipientPK, content, nil)
 }
 
 func TestMetadataCaching_SkipsRepublishOnRestart(t *testing.T) {
