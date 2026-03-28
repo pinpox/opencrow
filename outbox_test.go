@@ -17,7 +17,7 @@ func openTestOutbox(t *testing.T) *outboxStore {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestOutbox_GetAfterClose(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestOutbox_Persistence(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	// First connection: write some messages.
-	db1, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	db1, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestOutbox_Persistence(t *testing.T) {
 	db1.Close()
 
 	// Second connection: reads from the same file.
-	db2, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	db2, err := sql.Open("sqlite", dbPath+sqliteDSNParams)
 	if err != nil {
 		t.Fatal(err)
 	}
