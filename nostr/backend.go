@@ -26,6 +26,10 @@ import (
 // may drop data, so periodic refreshes ensure discoverability.
 const metadataRefreshInterval = 24 * time.Hour
 
+// seenRumorTTL is how long dedup entries are retained. 7 days covers the
+// NIP-59 randomization window with margin.
+const seenRumorTTL = 7 * 24 * time.Hour
+
 // ProfileConfig holds NIP-01 kind 0 metadata fields.
 type ProfileConfig struct {
 	Name        string // NIP-01 "name"
@@ -61,8 +65,6 @@ type Backend struct {
 	activeMu     sync.Mutex
 	activeConvID string
 
-	seenTTL time.Duration
-
 	// Persistent retry queue for failed publishes.
 	pubQueue *publishQueue
 
@@ -83,8 +85,6 @@ func NewBackend(ctx context.Context, cfg Config, handler backend.MessageHandler)
 		cfg.DMRelays = cfg.Relays
 	}
 
-	ttl := 7 * 24 * time.Hour // 7 days — covers NIP-59 randomization window with margin
-
 	db, err := OpenDB(ctx, cfg.SessionBaseDir)
 	if err != nil {
 		return nil, fmt.Errorf("nostr: opening db: %w", err)
@@ -104,7 +104,6 @@ func NewBackend(ctx context.Context, cfg Config, handler backend.MessageHandler)
 		cfg:      cfg,
 		handler:  handler,
 		db:       db,
-		seenTTL:  ttl,
 		pubQueue: pq,
 	}, nil
 }
@@ -504,7 +503,7 @@ func (b *Backend) pruneSeenLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			pruneStaleSeenRumors(ctx, b.db, b.seenTTL)
+			pruneStaleSeenRumors(ctx, b.db, seenRumorTTL)
 		}
 	}
 }
