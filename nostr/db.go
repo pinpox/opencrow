@@ -32,7 +32,8 @@ func OpenDB(ctx context.Context, dataDir string) (*DB, error) {
 
 	dbPath := filepath.Join(dataDir, nostrDBFile)
 
-	sqlDB, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	// modernc.org/sqlite uses _pragma=name(value), not _name=value.
+	sqlDB, err := sql.Open("sqlite", dbPath+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("opening nostr db: %w", err)
 	}
