@@ -467,8 +467,14 @@ let
         [ opencrowPi ]
         ++ lib.optional (icfg.environment.OPENCROW_BACKEND == "signal") opencrowSignalCli;
 
+      # The opencrow user only exists inside the container, not on the host,
+      # so we cannot reference it in host-side tmpfiles rules (systemd-tmpfiles
+      # would fail to resolve the name and skip the rule, leaving the bind
+      # mount source missing). Create the directory as root here; the
+      # container's own tmpfiles rules fix up ownership from the inside
+      # where the opencrow UID is known.
       tmpfilesRules = [
-        "d ${stateDir} 0750 opencrow opencrow -"
+        "d ${stateDir} 0750 - - -"
       ];
 
       containerPreStart = ''
@@ -518,6 +524,10 @@ let
             # Place the generated settings.json into PI_CODING_AGENT_DIR
             # so pi discovers declared extensions and packages.
             systemd.tmpfiles.rules = [
+              # Fix up ownership of the bind-mounted state dir. The host side
+              # created it as root because the opencrow user does not exist
+              # there; inside the container we know the UID and can chown it.
+              "d ${stateDir} 0750 opencrow opencrow -"
               "d ${icfg.environment.PI_CODING_AGENT_DIR} 0750 opencrow opencrow -"
               "L+ ${icfg.environment.PI_CODING_AGENT_DIR}/settings.json - - - - ${piSettingsJson}"
             ];
