@@ -32,8 +32,13 @@ const (
 
 // Circuit-breaker tuning.
 const (
-	// breakerThreshold is how many consecutive failures trip the breaker.
+	// breakerThreshold is how many consecutive connect failures trip the breaker.
 	breakerThreshold = 3
+
+	// rejectThreshold is how many times a relay may reject a specific
+	// event before we stop offering it. Prevents one poison event from
+	// being retried forever against a relay that will never accept it.
+	rejectThreshold = 3
 
 	// breakerBaseCooldown is the initial open duration. Doubles on each
 	// subsequent trip up to breakerMaxCooldown.
@@ -58,6 +63,11 @@ type publishItem struct {
 	// CreatedAt records when the item was first enqueued. Persisted, so
 	// age-based TTL works correctly across restarts.
 	CreatedAt time.Time
+	// rejects counts per-relay publish rejections for this event. Once a
+	// relay hits rejectThreshold we drop it from Pending without tripping
+	// the shared breaker — the relay is healthy, it just won't take this
+	// event (content filter, auth policy, etc.).
+	rejects map[string]int
 }
 
 // publishQueue is an outbox that all publishes go through. A background
@@ -218,24 +228,24 @@ func (q *publishQueue) drainOnce(ctx context.Context) time.Duration {
 	q.mu.Unlock()
 
 	for relay, items := range work {
-		if ctx.Err() != nil {
-			// Shutdown in progress — don't trip breakers or log noise.
-			// Reset any half-open breakers we transitioned above so they
-			// aren't stuck (defensive: state is in-mem so dies with us,
-			// but keeps invariants clean for tests).
-			q.mu.Lock()
-			for r := range probes {
-				if b := q.breakers[r]; b != nil && b.state == halfOpen {
+		_, isProbe := probes[relay]
+
+		if ctx.Err() != nil || !q.publishBatch(ctx, relay, items, isProbe) {
+			// Aborted before resolving this relay's breaker. Roll back
+			// any halfOpen transition so the relay isn't stuck in a
+			// state where allow() always returns deny.
+			if isProbe {
+				q.mu.Lock()
+				if b := q.breakers[relay]; b != nil && b.state == halfOpen {
 					b.state = open
 				}
+				q.mu.Unlock()
 			}
-			q.mu.Unlock()
 
-			break
+			if ctx.Err() != nil {
+				break
+			}
 		}
-
-		_, isProbe := probes[relay]
-		q.publishBatch(ctx, relay, items, isProbe)
 	}
 
 	q.mu.Lock()
@@ -279,8 +289,9 @@ func (q *publishQueue) collectWorkLocked(now time.Time) (map[string][]*publishIt
 }
 
 // publishBatch sends all items to one relay over a single connection.
-// Updates item and breaker state on completion.
-func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items []*publishItem, probe bool) {
+// Returns false if it bailed out without resolving the breaker (context
+// cancelled mid-batch), so the caller can roll back a halfOpen transition.
+func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items []*publishItem, probe bool) bool {
 	conn, err := q.pool.EnsureRelay(relayURL)
 	if err != nil {
 		slog.Log(ctx, probeLevel(probe), "nostr: relay connect failed",
@@ -290,14 +301,14 @@ func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items 
 		q.breakerLocked(relayURL).onFailure(time.Now())
 		q.mu.Unlock()
 
-		return
+		return true
 	}
 
 	var anyOK bool
 
 	for _, item := range items {
 		if ctx.Err() != nil {
-			return // shutdown; don't touch breaker
+			return false // shutdown; breaker left unresolved
 		}
 
 		// Per-event timeout so large batches don't starve the tail.
@@ -307,14 +318,7 @@ func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items 
 		cancel()
 
 		if err != nil {
-			// Per-event rejection (e.g. rate limit, content filter)
-			// doesn't mean the relay is dead — don't trip breaker here.
-			slog.Log(ctx, probeLevel(probe), "nostr: publish failed",
-				"relay", relayURL,
-				"event_id", item.Event.ID.Hex(),
-				"event_kind", item.Event.Kind,
-				"error", err,
-			)
+			q.recordReject(ctx, item, relayURL, err, probe)
 
 			continue
 		}
@@ -345,15 +349,50 @@ func (q *publishQueue) publishBatch(ctx context.Context, relayURL string, items 
 		q.mu.Unlock()
 	}
 
+	// Breaker tracks relay connectivity only. We reached the relay, so
+	// mark it healthy regardless of per-event outcomes — otherwise one
+	// event the relay refuses (content policy, wrong kind) would open
+	// the breaker and block every other event.
 	q.mu.Lock()
-	if anyOK {
-		q.breakerLocked(relayURL).onSuccess()
-	} else {
-		// Connected but every event failed — treat as a relay-level
-		// problem (auth required, write restricted, etc.).
-		q.breakerLocked(relayURL).onFailure(time.Now())
-	}
+	q.breakerLocked(relayURL).onSuccess()
 	q.mu.Unlock()
+
+	_ = anyOK // kept for potential future metrics
+
+	return true
+}
+
+// recordReject bumps the per-(item,relay) rejection counter and drops the
+// relay from the item once it's clear the relay will never accept this event.
+func (q *publishQueue) recordReject(ctx context.Context, item *publishItem, relayURL string, err error, probe bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if item.rejects == nil {
+		item.rejects = make(map[string]int)
+	}
+
+	item.rejects[relayURL]++
+	n := item.rejects[relayURL]
+
+	slog.Log(ctx, probeLevel(probe), "nostr: publish rejected",
+		"relay", relayURL,
+		"event_id", item.Event.ID.Hex(),
+		"event_kind", item.Event.Kind,
+		"rejects", n,
+		"error", err,
+	)
+
+	if n >= rejectThreshold {
+		delete(item.Pending, relayURL)
+		delete(item.rejects, relayURL)
+
+		slog.Warn("nostr: relay keeps rejecting event, dropping from target set",
+			"relay", relayURL,
+			"event_id", item.Event.ID.Hex(),
+			"rejects", n,
+		)
+	}
 }
 
 // evictLocked drops items that have completed or exceeded their TTL.
@@ -604,7 +643,11 @@ func (q *publishQueue) load(ctx context.Context) error {
 	for _, row := range rows {
 		var evt gonostr.Event
 		if err := evt.UnmarshalJSON([]byte(row.EventJson)); err != nil {
-			slog.Warn("nostr: skipping corrupt publish queue event", "id", row.ID, "error", err)
+			slog.Warn("nostr: deleting corrupt publish queue row", "id", row.ID, "error", err)
+
+			if derr := q.db.queries.DeletePublishItem(ctx, row.ID); derr != nil {
+				slog.Warn("nostr: failed to delete corrupt row", "id", row.ID, "error", derr)
+			}
 
 			continue
 		}
@@ -619,6 +662,9 @@ func (q *publishQueue) load(ctx context.Context) error {
 		}
 
 		if len(pending) == 0 {
+			// Row with no relays is useless; clean it up.
+			_ = q.db.queries.DeletePublishItem(ctx, row.ID)
+
 			continue
 		}
 

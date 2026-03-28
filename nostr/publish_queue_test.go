@@ -336,6 +336,80 @@ func TestRelayBreaker_CooldownDoublesAndCaps(t *testing.T) {
 	}
 }
 
+// Regression: a relay that rejects one event (content filter, auth policy)
+// must not have its circuit breaker tripped — that would block every other
+// event to a perfectly healthy relay.
+func TestPublishQueue_RejectDoesNotTripBreaker(t *testing.T) {
+	t.Parallel()
+
+	q := mustNewPublishQueue(t, t.TempDir())
+	defer q.db.Close()
+
+	relay := "wss://picky.example"
+
+	item := &publishItem{
+		Event:   signTestEvent(t),
+		Pending: map[string]struct{}{relay: {}},
+	}
+
+	// Simulate rejectThreshold rejections of this one event.
+	for range rejectThreshold {
+		q.recordReject(context.Background(), item, relay, context.DeadlineExceeded, false)
+	}
+
+	// The relay must be dropped from THIS item's pending set...
+	if _, ok := item.Pending[relay]; ok {
+		t.Error("relay still in Pending after rejectThreshold rejections")
+	}
+
+	// ...but the breaker must remain closed so other events still flow.
+	q.mu.Lock()
+	b := q.breakerLocked(relay)
+	q.mu.Unlock()
+
+	if b.state != closed {
+		t.Errorf("breaker state = %v, want closed (rejections must not trip breaker)", b.state)
+	}
+}
+
+// Regression: if a halfOpen probe is aborted (ctx cancelled mid-batch) the
+// breaker must not stay halfOpen, because allow(halfOpen) always denies —
+// the relay would never be retried again.
+func TestRelayBreaker_HalfOpenRollback(t *testing.T) {
+	t.Parallel()
+
+	q := mustNewPublishQueue(t, t.TempDir())
+	defer q.db.Close()
+
+	relay := "wss://flaky.example"
+
+	q.mu.Lock()
+	b := q.breakerLocked(relay)
+	// Trip to open.
+	for range breakerThreshold {
+		b.onFailure(time.Now())
+	}
+	// Transition to halfOpen as collectWorkLocked would.
+	b.allow(b.nextProbe.Add(time.Second))
+	q.mu.Unlock()
+
+	if b.state != halfOpen {
+		t.Fatalf("setup: state = %v, want halfOpen", b.state)
+	}
+
+	// Simulate the drainOnce rollback path (probe aborted).
+	q.mu.Lock()
+	if b.state == halfOpen {
+		b.state = open
+	}
+	q.mu.Unlock()
+
+	// Now a future allow() past nextProbe must grant a probe again.
+	if got := b.allow(b.nextProbe.Add(time.Second)); got != allowProbe {
+		t.Errorf("allow after rollback = %v, want allowProbe", got)
+	}
+}
+
 func TestPublishQueue_BreakerGC(t *testing.T) {
 	t.Parallel()
 
