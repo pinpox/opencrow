@@ -496,17 +496,15 @@ func (q *publishQueue) notifyFlush() {
 
 	gen := q.attemptGen
 
-	var remaining []flushWaiter
-
-	for _, w := range q.flushWaiters {
+	q.flushWaiters = slices.DeleteFunc(q.flushWaiters, func(w flushWaiter) bool {
 		if gen > w.gen {
 			close(w.ch)
-		} else {
-			remaining = append(remaining, w)
-		}
-	}
 
-	q.flushWaiters = remaining
+			return true
+		}
+
+		return false
+	})
 }
 
 // --- circuit breaker ---
