@@ -7,23 +7,37 @@ import (
 	"fiatjaf.com/nostr/nip19"
 )
 
-func TestLoadKeys_Hex(t *testing.T) {
+func TestLoadKeys(t *testing.T) {
 	t.Parallel()
 
 	sk := gonostr.Generate()
 	wantPK := sk.Public()
 
-	keys, err := loadKeys(sk.Hex())
-	if err != nil {
-		t.Fatalf("loadKeys: %v", err)
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"hex", sk.Hex()},
+		{"nsec", nip19.EncodeNsec(sk)},
 	}
 
-	if keys.SK != sk {
-		t.Errorf("SK = %s, want %s", keys.SK, sk)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	if keys.PK != wantPK {
-		t.Errorf("PK = %s, want %s", keys.PK, wantPK)
+			keys, err := loadKeys(tc.input)
+			if err != nil {
+				t.Fatalf("loadKeys: %v", err)
+			}
+
+			if keys.SK != sk {
+				t.Errorf("SK = %s, want %s", keys.SK, sk)
+			}
+
+			if keys.PK != wantPK {
+				t.Errorf("PK = %s, want %s", keys.PK, wantPK)
+			}
+		})
 	}
 }
 
@@ -33,26 +47,5 @@ func TestDecodeNpubToHex_InvalidHex(t *testing.T) {
 	_, err := DecodeNpubToHex("not-valid-hex")
 	if err == nil {
 		t.Fatal("expected error for invalid hex input, got nil")
-	}
-}
-
-func TestLoadKeys_Nsec(t *testing.T) {
-	t.Parallel()
-
-	sk := gonostr.Generate()
-	wantPK := sk.Public()
-	nsec := nip19.EncodeNsec(sk)
-
-	keys, err := loadKeys(nsec)
-	if err != nil {
-		t.Fatalf("loadKeys: %v", err)
-	}
-
-	if keys.SK != sk {
-		t.Errorf("SK = %s, want %s", keys.SK, sk)
-	}
-
-	if keys.PK != wantPK {
-		t.Errorf("PK = %s, want %s", keys.PK, wantPK)
 	}
 }
