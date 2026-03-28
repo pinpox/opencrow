@@ -3,6 +3,7 @@ package signal
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -619,20 +620,9 @@ func addRecipientParams(params map[string]any, conversationID string) {
 }
 
 func parseGroupConversationID(conversationID string) (string, bool) {
-	if !strings.HasPrefix(conversationID, groupConversationPrefix) {
-		return "", false
-	}
+	groupID, ok := strings.CutPrefix(conversationID, groupConversationPrefix)
 
-	groupID := strings.TrimPrefix(conversationID, groupConversationPrefix)
-	if groupID == "" {
-		return "", false
-	}
-
-	return groupID, true
-}
-
-func conversationIDForGroup(groupID string) string {
-	return groupConversationPrefix + groupID
+	return groupID, ok && groupID != ""
 }
 
 type sendResult struct {
@@ -724,7 +714,7 @@ func decodeReceiveMessage(payload []byte, configDir string) (*backend.Message, b
 
 	conversationID := sender
 	if env.DataMessage.GroupInfo != nil && env.DataMessage.GroupInfo.GroupID != "" {
-		conversationID = conversationIDForGroup(env.DataMessage.GroupInfo.GroupID)
+		conversationID = groupConversationPrefix + env.DataMessage.GroupInfo.GroupID
 	}
 
 	text := strings.TrimSpace(env.DataMessage.Message)
@@ -741,7 +731,7 @@ func decodeReceiveMessage(payload []byte, configDir string) (*backend.Message, b
 	}
 
 	var messageID string
-	if ts := firstNonZero(env.DataMessage.Timestamp, env.Timestamp); ts != 0 {
+	if ts := cmp.Or(env.DataMessage.Timestamp, env.Timestamp); ts != 0 {
 		messageID = strconv.FormatInt(ts, 10)
 	}
 
@@ -781,10 +771,9 @@ func formatAttachmentText(attachments []receiveAttachment, configDir string) str
 
 		filePath := resolveAttachmentPath(a.Filename, configDir)
 
-		switch {
-		case filePath != "":
+		if filePath != "" {
 			lines = append(lines, fmt.Sprintf("[User sent a file (%s): %s]", caption, filePath))
-		default:
+		} else {
 			lines = append(lines, fmt.Sprintf("[User sent a file (%s)]", caption))
 		}
 	}
@@ -815,16 +804,6 @@ func firstNonEmpty(vals ...string) string {
 	}
 
 	return ""
-}
-
-func firstNonZero(vals ...int64) int64 {
-	for _, v := range vals {
-		if v != 0 {
-			return v
-		}
-	}
-
-	return 0
 }
 
 type rpcRequest struct {
