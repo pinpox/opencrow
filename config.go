@@ -64,6 +64,10 @@ type NostrConfig struct {
 
 type PiConfig struct {
 	BinaryPath string
+	// BinaryArgs are inserted before pi's own flags. Unused in production;
+	// tests use it to run the fake-pi stub via `bash <script>` so the
+	// testdata file needs no exec bit and no shebang lookup.
+	BinaryArgs []string
 	// SessionDir holds opencrow's internal state: pi session jsonl, opencrow.db,
 	// .room_id, trigger.pipe, downloaded attachments. Not the agent's cwd.
 	SessionDir string

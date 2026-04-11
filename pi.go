@@ -43,7 +43,13 @@ type PiProcess struct {
 // StartPi spawns a pi --mode rpc subprocess for the given room.
 // fresh=true omits --continue so pi creates a new session file
 // instead of resuming the most recent one from SessionDir.
-func StartPi(ctx context.Context, cfg PiConfig, roomID string, fresh bool) (*PiProcess, error) {
+//
+// The process is intentionally NOT bound to any caller context:
+// its lifetime is owned by Worker (idle reaper, Restart, Run shutdown
+// via stopPi). Binding it to the per-item ctx via exec.CommandContext
+// SIGKILLs pi the moment processItem returns, which is the bug behind
+// "No active session to compact".
+func StartPi(cfg PiConfig, roomID string, fresh bool) (*PiProcess, error) {
 	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating session dir: %w", err)
 	}
@@ -61,7 +67,8 @@ func StartPi(ctx context.Context, cfg PiConfig, roomID string, fresh bool) (*PiP
 
 	args := buildPiArgs(cfg, fresh)
 
-	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
+	// context.Background: see the doc comment on StartPi.
+	cmd := exec.CommandContext(context.Background(), cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
 	cmd.Dir = cfg.WorkingDir
 	cmd.Env = append(os.Environ(), "OPENCROW_SESSION_DIR="+cfg.SessionDir)
 
@@ -162,7 +169,9 @@ func startPiProcess(cmd *exec.Cmd, sessionDir string) (*PiProcess, error) {
 }
 
 func buildPiArgs(cfg PiConfig, fresh bool) []string {
-	args := []string{"--mode", "rpc", "--session-dir", cfg.SessionDir}
+	args := append([]string(nil), cfg.BinaryArgs...)
+
+	args = append(args, "--mode", "rpc", "--session-dir", cfg.SessionDir)
 	if !fresh {
 		args = append(args, "--continue")
 	}

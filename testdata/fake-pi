@@ -1,0 +1,16 @@
+# Minimal pi --mode rpc stub for tests: ack each prompt then idle.
+# Invoked as `bash testdata/fake-pi` (see PiConfig.BinaryArgs); no exec bit needed.
+# shellcheck shell=bash
+set -eu
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*|*'"type": "prompt"'*)
+      printf '%s\n' '{"type":"response","command":"prompt","success":true}'
+      printf '%s\n' '{"type":"agent_start"}'
+      printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"stopReason":"end_turn"}]}'
+      ;;
+    *'"type":"compact"'*|*'"type": "compact"'*)
+      printf '%s\n' '{"type":"response","command":"compact","success":true,"data":{"tokensBefore":1,"summary":"s"}}'
+      ;;
+  esac
+done
