@@ -63,7 +63,7 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	// Record the incoming message so future reply-to references can quote it.
 	a.outbox.Put(ctx, msg.ConversationID, msg.MessageID, msg.Text)
 
-	switch msg.Text {
+	switch strings.TrimSpace(msg.Text) {
 	case "!help":
 		a.handleHelp(ctx, msg)
 	case "!restart":
