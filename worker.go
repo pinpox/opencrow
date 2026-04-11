@@ -532,7 +532,11 @@ func (w *Worker) ensurePi(ctx context.Context) (*PiProcess, error) {
 
 	roomID := w.resolveRoomID()
 
-	pi, err := StartPi(ctx, w.piCfg, roomID, fresh)
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("ensurePi cancelled: %w", ctx.Err())
+	}
+
+	pi, err := StartPi(w.piCfg, roomID, fresh) //nolint:contextcheck // see StartPi: process lifetime is worker-owned, not item-scoped
 	if err != nil {
 		return nil, err
 	}

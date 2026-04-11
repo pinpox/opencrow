@@ -14,6 +14,7 @@ buildGoModule (finalAttrs: {
       (lib.fileset.fileFilter (file: file.hasExt "go") ./..)
       (lib.fileset.fileFilter (file: file.hasExt "sql") ./..)
       ./../.golangci.yml
+      ./../testdata
       ./../skills
       ./../SOUL.md
     ];
