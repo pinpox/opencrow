@@ -92,23 +92,30 @@ func run() int {
 
 	setupShutdown(b, cancel)
 
-	go worker.Run(ctx)
+	workerDone := spawnWorker(ctx, worker)
 
 	slog.Info("opencrow starting")
+
+	exitCode := 0
 
 	if err := b.Run(ctx); err != nil {
 		if ctx.Err() == nil {
 			slog.Error("backend exited with error", "error", err)
 
-			return 1
+			exitCode = 1
+		} else {
+			slog.Info("shutdown complete")
 		}
-
-		slog.Info("shutdown complete")
 	}
+
+	// Backend may have returned without a signal (error path); ensure
+	// the worker sees ctx.Done so the join below cannot hang.
+	cancel()
+	<-workerDone
 
 	_ = b.Close()
 
-	return 0
+	return exitCode
 }
 
 // sqliteDSNParams are the connection parameters for modernc.org/sqlite.
@@ -224,6 +231,23 @@ func createBackend(ctx context.Context, cfg *Config, handler backend.MessageHand
 	default:
 		return nil, fmt.Errorf("unsupported backend type: %q", cfg.BackendType)
 	}
+}
+
+// spawnWorker runs the worker loop in a goroutine and returns a channel
+// that closes when it exits. main must join on this before returning:
+// Worker.Run is the only path that calls stopPi on shutdown, and
+// os.Exit otherwise races it, leaving pi (plus tool subprocesses)
+// running. Pdeathsig in StartPi is the backstop, but graceful SIGTERM
+// via stopPi is the intended path.
+func spawnWorker(ctx context.Context, w *Worker) <-chan struct{} {
+	done := make(chan struct{})
+
+	go func() {
+		w.Run(ctx)
+		close(done)
+	}()
+
+	return done
 }
 
 func setupShutdown(b backend.Backend, cancel context.CancelFunc) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -71,28 +72,46 @@ func StartPi(cfg PiConfig, roomID string, fresh bool) (*PiProcess, error) {
 	cmd := exec.CommandContext(context.Background(), cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
 	cmd.Dir = cfg.WorkingDir
 	cmd.Env = append(os.Environ(), "OPENCROW_SESSION_DIR="+cfg.SessionDir)
+	// Own process group + Pdeathsig: Kill must take down tool
+	// subprocesses too, and pi must not outlive opencrow even if Kill
+	// never runs. See configurePiSysProcAttr.
+	configurePiSysProcAttr(cmd)
 
 	return startPiProcess(cmd, cfg.SessionDir)
 }
 
-// Kill terminates the pi process.
+// Kill terminates the pi process and every descendant it spawned.
+// Signalling only the leader is not enough: pi forks bash/curl/nix for
+// tool calls, and those get reparented to init when pi exits, keeping
+// the systemd cgroup non-empty and stalling container restart on
+// TimeoutStopSec. configurePiSysProcAttr gave pi its own pgid, so a
+// negative-pid kill reaches the whole tree.
 func (p *PiProcess) Kill() {
 	if p.cmd.Process == nil {
 		return
 	}
 
+	pid := p.cmd.Process.Pid
+
 	_ = p.stdin.Close()
-	_ = p.cmd.Process.Signal(os.Interrupt)
+
+	killProcessTree(pid, syscall.SIGTERM)
 
 	select {
 	case <-p.done:
-		return
 	case <-time.After(5 * time.Second):
-		slog.Warn("pi: process did not exit after SIGINT, sending SIGKILL")
+		slog.Warn("pi: process group did not exit after SIGTERM, sending SIGKILL")
 
-		_ = p.cmd.Process.Kill()
+		killProcessTree(pid, syscall.SIGKILL)
+
 		<-p.done
 	}
+
+	// p.done only tracks the leader's Wait(); a grandchild that
+	// ignored SIGTERM may still be running. Belt-and-braces SIGKILL
+	// the group — ESRCH is the expected outcome when everything is
+	// already gone.
+	killProcessTree(pid, syscall.SIGKILL)
 }
 
 // IsAlive returns true if the pi process is still running.
