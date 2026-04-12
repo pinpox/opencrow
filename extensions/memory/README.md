@@ -4,9 +4,13 @@ Cross-session recall for opencrow using [sediment](https://github.com/rendro/sed
 
 ## What it does
 
-- **Captures** conversation content and compaction summaries into sediment
+- **Captures** durable facts (`[kind] subject: body`) extracted from
+  each turn, plus compaction summaries
 - **Recalls** relevant memories before each prompt and injects them into context
-- **Provides** a `memory_search` tool the LLM can use to explicitly search past conversations
+- **Provides** a `memory_search` tool for explicit lookup
+
+Facts supersede by subject, so stale exemplars get replaced rather
+than accumulating. See `index.ts` for details.
 
 ## Requirements
 
