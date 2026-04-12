@@ -5,6 +5,16 @@ set -eu
 while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*|*'"type": "prompt"'*)
+      # When the prompt asks for it, fork a long-lived grandchild and
+      # record its PID so the test can verify stopPi reaps the whole
+      # process tree, not just the fake-pi leader. Mirrors real pi
+      # running a slow bash tool when shutdown arrives.
+      case "$line" in
+        *spawn-child*)
+          sleep 300 &
+          printf '%s' "$!" > "$OPENCROW_SESSION_DIR/child.pid"
+          ;;
+      esac
       printf '%s\n' '{"type":"response","command":"prompt","success":true}'
       printf '%s\n' '{"type":"agent_start"}'
       printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"stopReason":"end_turn"}]}'
