@@ -155,16 +155,18 @@ func buildHeartbeatPrompt(basePrompt string, items []string) string {
 }
 
 // shouldSuppressReply returns true if the reply should not be forwarded
-// to the user — either because it contains HEARTBEAT_OK or is empty.
-func shouldSuppressReply(reply, label string) bool {
-	if strings.Contains(reply, "HEARTBEAT_OK") {
-		slog.Info(label + ": HEARTBEAT_OK, suppressing")
+// to the user. The HEARTBEAT_OK sentinel is honoured only for heartbeat
+// items — triggers are explicit external events and must always surface,
+// otherwise the model can silently swallow them by emitting the sentinel.
+func shouldSuppressReply(reply, source string) bool {
+	if source == sourceHeartbeat && strings.Contains(reply, "HEARTBEAT_OK") {
+		slog.Info(source + ": HEARTBEAT_OK, suppressing")
 
 		return true
 	}
 
 	if reply == "" {
-		slog.Info(label + ": empty response, suppressing")
+		slog.Info(source + ": empty response, suppressing")
 
 		return true
 	}

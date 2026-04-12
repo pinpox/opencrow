@@ -341,9 +341,7 @@ remind_at tool instead.`
 const defaultHeartbeatPrompt = `Run through the standing checks below.
 If nothing needs attention, reply with exactly: HEARTBEAT_OK`
 
-const defaultTriggerPrompt = `An external process sent a trigger message. Read the content below and act on it.
-You MUST fully process the trigger before deciding on a response. Only reply with
-exactly HEARTBEAT_OK if your processing rules explicitly tell you to ignore it.`
+const defaultTriggerPrompt = `External trigger received. Always respond with a brief human-readable summary for the user — never a status code or sentinel. If duplicate or no-op, say so.`
 
 func loadNostrConfig(env envReader) (NostrConfig, error) {
 	privateKey, err := loadNostrPrivateKey(env)
