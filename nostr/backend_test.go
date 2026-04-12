@@ -38,7 +38,7 @@ func TestSendMessage_PublishesGiftWrap(t *testing.T) {
 
 	b := newTestBackend(t, botSK, []string{wsURL}, nil)
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	kr := keyer.NewPlainKeySigner(botSK)
 	b.pool = pool
 	b.kr = kr
@@ -85,7 +85,7 @@ func fetchGiftWrapRumor(ctx context.Context, t *testing.T, relays []string, kr g
 	t.Helper()
 
 	for {
-		pool := gonostr.NewPool(gonostr.PoolOptions{})
+		pool := gonostr.NewPool()
 
 		events := pool.FetchMany(ctx, relays, gonostr.Filter{
 			Kinds: []gonostr.Kind{gonostr.KindGiftWrap},
@@ -446,7 +446,7 @@ func fetchReactionRumor(t *testing.T, wsURL string, senderSK gonostr.SecretKey) 
 	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer fetchCancel()
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("test done")
 
 	events := pool.FetchMany(fetchCtx, []string{wsURL}, gonostr.Filter{
@@ -534,7 +534,7 @@ func TestSendReaction_DisallowedUserNoReaction(t *testing.T) {
 	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer fetchCancel()
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("test done")
 
 	events := pool.FetchMany(fetchCtx, []string{wsURL}, gonostr.Filter{
@@ -839,7 +839,7 @@ func publishDMRelayListEvent(t *testing.T, publishRelay string, sk gonostr.Secre
 		t.Fatalf("signing DM relay list: %v", err)
 	}
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("test done")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -859,7 +859,7 @@ func publishDMRelayListEvent(t *testing.T, publishRelay string, sk gonostr.Secre
 func sendTestDMWithTags(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, content string, extraTags gonostr.Tags) {
 	t.Helper()
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("test done")
 
 	kr := keyer.NewPlainKeySigner(senderSK)
@@ -959,7 +959,7 @@ func runBackendOnce(t *testing.T, cfg Config) {
 func countEventsOfKind(t *testing.T, relayURL string, kind gonostr.Kind, author gonostr.PubKey) int {
 	t.Helper()
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("count events")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1035,7 +1035,7 @@ func sendTestEncryptedFileMessage(ctx context.Context, t *testing.T, wsURL strin
 func sendTestFileMessageWithTags(ctx context.Context, t *testing.T, wsURL string, senderSK gonostr.SecretKey, recipientPK gonostr.PubKey, fileURL string, extraTags gonostr.Tags) {
 	t.Helper()
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("test done")
 
 	kr := keyer.NewPlainKeySigner(senderSK)

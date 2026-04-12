@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	fiatjaf.com/lib v0.3.6 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
@@ -59,4 +60,6 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace fiatjaf.com/nostr => github.com/Mic92/nostr v0.0.0-20260309214535-bf10dcd245b8
+// Tracks gitnostr.com/.../nostrlib master plus four race fixes; drop
+// once upstream takes them. See github.com/Mic92/nostr fix-data-races.
+replace fiatjaf.com/nostr => github.com/Mic92/nostr v0.0.0-20260412123246-6548e7c41db2

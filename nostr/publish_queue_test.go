@@ -17,7 +17,7 @@ func TestPublishQueue_EnqueueAndDrain(t *testing.T) {
 	wsURL, cleanup := testutil.StartTestRelay(t)
 	defer cleanup()
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("test done")
 
 	ctx := context.Background()
@@ -69,7 +69,7 @@ func TestPublishQueue_PartialSuccess_DeliveredNotPersisted(t *testing.T) {
 	goodURL, cleanupGood := testutil.StartTestRelay(t)
 	defer cleanupGood()
 
-	pool := gonostr.NewPool(gonostr.PoolOptions{})
+	pool := gonostr.NewPool()
 	defer pool.Close("test done")
 
 	ctx := context.Background()
@@ -127,7 +127,7 @@ func TestPublishQueue_PersistenceAcrossRestart(t *testing.T) {
 	evt := signTestEvent(t)
 
 	// First "run": enqueue to an unreachable relay, drain fails, persists.
-	pool1 := gonostr.NewPool(gonostr.PoolOptions{})
+	pool1 := gonostr.NewPool()
 
 	q1 := mustNewPublishQueue(t, dir)
 	q1.setPool(pool1)

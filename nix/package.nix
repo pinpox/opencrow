@@ -19,7 +19,7 @@ buildGoModule (finalAttrs: {
       ./../SOUL.md
     ];
   };
-  vendorHash = "sha256-xmdndPplq1pvnz/tHwEAUiXM+INO2aIVJprAKZpOnVo=";
+  vendorHash = "sha256-lTNMcfe8ZTKrrhIz3CZgwiU5/OKSKIoA9eIOdhqdo7w=";
   subPackages = [ "." ];
   tags = [ "goolm" ];
 

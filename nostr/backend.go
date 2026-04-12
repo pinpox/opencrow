@@ -110,11 +110,10 @@ func NewBackend(ctx context.Context, cfg Config, handler backend.MessageHandler)
 //
 //nolint:contextcheck // publish queue intentionally uses a non-inherited context
 func (b *Backend) Run(ctx context.Context) error {
-	b.pool = gonostr.NewPool(gonostr.PoolOptions{
-		AuthRequiredHandler: func(_ context.Context, evt *gonostr.Event) error {
-			return evt.Sign(b.keys.SK)
-		},
-	})
+	b.pool = gonostr.NewPool()
+	b.pool.RelayOptions.AuthHandler = func(_ context.Context, _ *gonostr.Relay, evt *gonostr.Event) error {
+		return evt.Sign(b.keys.SK)
+	}
 
 	// Create keyer for NIP-44 encrypt/decrypt
 	kr := keyer.NewPlainKeySigner(b.keys.SK)
