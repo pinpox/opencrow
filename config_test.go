@@ -199,6 +199,50 @@ func TestNostrConfig_AllowedUsersNpubDecoding(t *testing.T) {
 	}
 }
 
+func TestSocketConfig_Defaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(testEnv(map[string]string{
+		"OPENCROW_BACKEND": "socket",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	if cfg.BackendType != backendSocket {
+		t.Errorf("BackendType = %q, want %q", cfg.BackendType, backendSocket)
+	}
+
+	if cfg.Socket.SocketPath == "" {
+		t.Error("Socket.SocketPath should have a default")
+	}
+
+	if cfg.Socket.Name != "OpenCrow" {
+		t.Errorf("Socket.Name = %q, want OpenCrow", cfg.Socket.Name)
+	}
+}
+
+func TestSocketConfig_CustomValues(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(testEnv(map[string]string{
+		"OPENCROW_BACKEND":     "socket",
+		"OPENCROW_SOCKET_PATH": "/tmp/custom.sock",
+		"OPENCROW_SOCKET_NAME": "MyBot",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	if cfg.Socket.SocketPath != "/tmp/custom.sock" {
+		t.Errorf("SocketPath = %q, want /tmp/custom.sock", cfg.Socket.SocketPath)
+	}
+
+	if cfg.Socket.Name != "MyBot" {
+		t.Errorf("Name = %q, want MyBot", cfg.Socket.Name)
+	}
+}
+
 func TestDiscoverSkills_Symlinks(t *testing.T) {
 	t.Parallel()
 

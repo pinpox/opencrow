@@ -16,15 +16,22 @@ const (
 	backendMatrix = "matrix"
 	backendNostr  = "nostr"
 	backendSignal = "signal"
+	backendSocket = "socket"
 )
 
 type Config struct {
-	BackendType string // backendMatrix, backendNostr, or backendSignal
+	BackendType string // backendMatrix, backendNostr, backendSignal, or backendSocket
 	Matrix      MatrixConfig
 	Nostr       NostrConfig
 	Signal      SignalConfig
+	Socket      SocketConfig
 	Pi          PiConfig
 	Heartbeat   HeartbeatConfig
+}
+
+type SocketConfig struct {
+	SocketPath string
+	Name       string
 }
 
 type HeartbeatConfig struct {
@@ -95,10 +102,10 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 	backendType := env.or("OPENCROW_BACKEND", backendMatrix)
 
 	switch backendType {
-	case backendMatrix, backendNostr, backendSignal:
+	case backendMatrix, backendNostr, backendSignal, backendSocket:
 		// valid
 	default:
-		return nil, fmt.Errorf("OPENCROW_BACKEND=%q is not supported (valid: matrix, nostr, signal)", backendType)
+		return nil, fmt.Errorf("OPENCROW_BACKEND=%q is not supported (valid: matrix, nostr, signal, socket)", backendType)
 	}
 
 	idleTimeout, err := env.duration("OPENCROW_PI_IDLE_TIMEOUT", 30*time.Minute)
@@ -127,6 +134,10 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 			CryptoDBPath: env.or("OPENCROW_MATRIX_CRYPTO_DB", filepath.Join(workingDir, "crypto.db")),
 		},
 		Signal: loadSignalConfig(env, workingDir, allowedUsers),
+		Socket: SocketConfig{
+			SocketPath: env.or("OPENCROW_SOCKET_PATH", filepath.Join(workingDir, "sessions", "chat.sock")),
+			Name:       env.or("OPENCROW_SOCKET_NAME", "OpenCrow"),
+		},
 		Pi: PiConfig{
 			BinaryPath:    env.or("OPENCROW_PI_BINARY", "pi"),
 			SessionDir:    env.or("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
@@ -165,6 +176,8 @@ func (cfg *Config) validateBackend(env envReader) error {
 		cfg.Nostr = nostrCfg
 	case backendSignal:
 		return cfg.Signal.validate()
+	case backendSocket:
+		// socket has sensible defaults, no validation needed
 	}
 
 	return nil

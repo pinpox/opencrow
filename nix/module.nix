@@ -196,6 +196,7 @@ let
                 "matrix"
                 "nostr"
                 "signal"
+                "socket"
               ];
               default = "matrix";
               description = "Messaging backend to use.";
