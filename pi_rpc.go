@@ -56,6 +56,15 @@ type rpcEvent struct {
 	// extension_error fields
 	ExtensionPath string `json:"extensionPath,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
 	Event         string `json:"event,omitempty"`
+
+	// message_update fields — camelCase is dictated by the pi protocol.
+	AssistantMessageEvent *assistantMessageEvent `json:"assistantMessageEvent,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
+}
+
+// assistantMessageEvent is the streaming delta payload inside a message_update event.
+type assistantMessageEvent struct {
+	Type  string `json:"type"`            // "text_delta", "thinking_delta", "text_start", etc.
+	Delta string `json:"delta,omitempty"` // incremental text content
 }
 
 // CompactResult holds the data returned by a successful compact command.
@@ -112,7 +121,8 @@ func (p *PiProcess) Compact(ctx context.Context) (*CompactResult, error) {
 // The caller must ensure only one goroutine calls this at a time.
 // If ctx is cancelled, an abort command is sent to pi and the response
 // is drained before returning.
-func (p *PiProcess) sendAndWait(ctx context.Context, message string) (string, error) {
+// onDelta, if non-nil, is called with each text delta during generation.
+func (p *PiProcess) sendAndWait(ctx context.Context, message string, onDelta func(string)) (string, error) {
 	if !p.IsAlive() {
 		return "", errors.New("pi process is not alive")
 	}
@@ -121,7 +131,7 @@ func (p *PiProcess) sendAndWait(ctx context.Context, message string) (string, er
 		return "", err
 	}
 
-	return p.waitForResult(ctx)
+	return p.waitForResult(ctx, onDelta)
 }
 
 func (p *PiProcess) sendCommand(cmd any) error {
@@ -288,6 +298,7 @@ func (p *PiProcess) handleSideEffects(evt rpcEvent) error {
 type resultWaiter struct {
 	reply    string
 	finalErr string
+	onDelta  func(string) // called with each text delta during generation
 }
 
 // continuesTurn returns true for events that mean pi is still working
@@ -308,6 +319,13 @@ func (w *resultWaiter) handle(evt rpcEvent) (bool, error) {
 			w.finalErr = evt.FinalError
 
 			return true, nil
+		}
+
+	case rpcTypeMessageUpdate:
+		if w.onDelta != nil && evt.AssistantMessageEvent != nil &&
+			evt.AssistantMessageEvent.Type == "text_delta" &&
+			evt.AssistantMessageEvent.Delta != "" {
+			w.onDelta(evt.AssistantMessageEvent.Delta)
 		}
 
 	case rpcTypeAgentEnd:
@@ -381,8 +399,10 @@ func (w *resultWaiter) handleAgentEnd(evt rpcEvent) {
 // perceptible latency to the rare "pi gave up and went idle" path.
 const errGraceWindow = 200 * time.Millisecond
 
-func (p *PiProcess) waitForResult(ctx context.Context) (string, error) {
+func (p *PiProcess) waitForResult(ctx context.Context, onDelta func(string)) (string, error) {
 	var w resultWaiter
+
+	w.onDelta = onDelta
 
 	// The loop may run more than once: drainEvents returns when
 	// handle() says "done", but an error agent_end is only
