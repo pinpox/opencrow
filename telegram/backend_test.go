@@ -26,6 +26,11 @@ type fakeAPI struct {
 	files    map[string][]byte // path -> body for /file/bot<token>/<path>
 	tokenSeg string
 
+	// failHTML, when true, makes sendMessage fail the first call with
+	// parse_mode=HTML and succeed when parse_mode is absent — exercising
+	// the plain-text fallback path.
+	failHTML bool
+
 	called atomic.Int32
 }
 
@@ -85,7 +90,14 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 
 		f.mu.Lock()
 		f.sendLog = append(f.sendLog, payload)
+		failHTML := f.failHTML && payload["parse_mode"] == "HTML"
 		f.mu.Unlock()
+
+		if failHTML {
+			writeErr(w, "Bad Request: can't parse entities")
+
+			return
+		}
 
 		writeOK(w, map[string]any{"message_id": 42})
 
@@ -120,6 +132,11 @@ func (f *fakeAPI) addFile(path string, body []byte) {
 func writeOK(w http.ResponseWriter, result any) {
 	resp := map[string]any{"ok": true, "result": result}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func writeErr(w http.ResponseWriter, description string) {
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "description": description})
 }
 
 func TestBackend_New_RejectsEmptyToken(t *testing.T) {
@@ -169,6 +186,70 @@ func TestBackend_SendMessage(t *testing.T) {
 
 	if rp["message_id"].(float64) != 55 {
 		t.Errorf("reply_parameters.message_id = %v, want 55", rp["message_id"])
+	}
+}
+
+func TestBackend_SendMessage_RendersMarkdownAsHTML(t *testing.T) {
+	t.Parallel()
+
+	api := newFakeAPI(t, "tok")
+
+	b, err := New(Config{Token: "tok", APIBase: api.srv.URL}, func(context.Context, backend.Message) {})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if id := b.SendMessage(context.Background(), "100", "this is **bold** and `code`", ""); id == "" {
+		t.Fatal("expected non-empty id")
+	}
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+
+	if len(api.sendLog) != 1 {
+		t.Fatalf("expected 1 send call, got %d", len(api.sendLog))
+	}
+
+	got := api.sendLog[0]
+
+	if got["parse_mode"] != "HTML" {
+		t.Errorf("parse_mode = %v, want HTML", got["parse_mode"])
+	}
+
+	want := "this is <b>bold</b> and <code>code</code>"
+	if got["text"] != want {
+		t.Errorf("text = %q, want %q", got["text"], want)
+	}
+}
+
+func TestBackend_SendMessage_FallsBackToPlainOnHTMLError(t *testing.T) {
+	t.Parallel()
+
+	api := newFakeAPI(t, "tok")
+	api.failHTML = true
+
+	b, err := New(Config{Token: "tok", APIBase: api.srv.URL}, func(context.Context, backend.Message) {})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if id := b.SendMessage(context.Background(), "100", "weird **broken markdown", ""); id == "" {
+		t.Fatal("expected fallback to succeed")
+	}
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+
+	if len(api.sendLog) != 2 {
+		t.Fatalf("expected 2 send calls (HTML attempt + plain fallback), got %d", len(api.sendLog))
+	}
+
+	if api.sendLog[1]["parse_mode"] != nil {
+		t.Errorf("fallback should not set parse_mode, got %v", api.sendLog[1]["parse_mode"])
+	}
+
+	if api.sendLog[1]["text"] != "weird **broken markdown" {
+		t.Errorf("fallback text = %q, want raw original", api.sendLog[1]["text"])
 	}
 }
 
@@ -350,7 +431,7 @@ func TestBackend_MarkdownFlavor(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if got := b.MarkdownFlavor(); got != backend.MarkdownNone {
-		t.Errorf("flavor = %d, want %d", got, backend.MarkdownNone)
+	if got := b.MarkdownFlavor(); got != backend.MarkdownFull {
+		t.Errorf("flavor = %d, want %d", got, backend.MarkdownFull)
 	}
 }

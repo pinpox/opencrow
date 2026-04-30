@@ -140,6 +140,10 @@ func (b *Backend) Close() error {
 }
 
 // SendMessage sends a text message to the given conversation (chat ID as string).
+// The text is rendered as Telegram HTML (parse_mode=HTML) so pi's markdown
+// (**bold**, `code`, [links](url), etc.) appears formatted. If Telegram
+// rejects the rendered HTML (unbalanced markdown slipping past the
+// converter), the message is resent as plain text without parse_mode.
 // Returns the new message ID, or "" on failure.
 func (b *Backend) SendMessage(ctx context.Context, conversationID string, text string, replyToID string) string {
 	if strings.TrimSpace(text) == "" {
@@ -153,9 +157,34 @@ func (b *Backend) SendMessage(ctx context.Context, conversationID string, text s
 		return ""
 	}
 
+	rendered := markdownToHTML(text)
+
+	id, err := b.sendText(ctx, chatID, rendered, replyToID, "HTML")
+	if err == nil {
+		return id
+	}
+
+	slog.Warn("telegram: HTML send failed, retrying as plain text",
+		"conversation", conversationID, "error", err)
+
+	id, err = b.sendText(ctx, chatID, text, replyToID, "")
+	if err != nil {
+		slog.Error("telegram: sendMessage failed", "conversation", conversationID, "error", err)
+
+		return ""
+	}
+
+	return id
+}
+
+func (b *Backend) sendText(ctx context.Context, chatID int64, text, replyToID, parseMode string) (string, error) {
 	payload := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
+	}
+
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
 	}
 
 	if replyToID != "" {
@@ -172,12 +201,10 @@ func (b *Backend) SendMessage(ctx context.Context, conversationID string, text s
 	}
 
 	if err := b.callJSON(ctx, "sendMessage", payload, &result); err != nil {
-		slog.Error("telegram: sendMessage failed", "conversation", conversationID, "error", err)
-
-		return ""
+		return "", err
 	}
 
-	return strconv.FormatInt(result.MessageID, 10)
+	return strconv.FormatInt(result.MessageID, 10), nil
 }
 
 // SendFile uploads and sends a local file as a Telegram document.
@@ -257,16 +284,21 @@ Use the read tool to inspect the file.
 
 ## Formatting
 
-Telegram does not render Markdown by default. Avoid Markdown syntax — write
-plain prose. If you must include code, paste it directly without backtick
-fences.`
+Markdown is rendered. You can use **bold**, *italic*, ` + "`inline code`" + `,
+fenced ` + "```code blocks```" + `, [links](https://example.com), ~~strike~~, and
+"-" / "*" bullet lists. Headings (#, ##) are rendered as bold lines.
+Telegram has no real list / table layout — keep them simple.
+
+Avoid raw HTML in your replies; the bridge converts your markdown to the
+HTML subset Telegram understands.`
 }
 
-// MarkdownFlavor: Telegram does not interpret Markdown unless parse_mode
-// is set, which OpenCrow does not do (parse_mode='MarkdownV2' requires
-// strict escaping of special characters and rejects unbalanced syntax).
+// MarkdownFlavor reports MarkdownFull because the backend converts
+// markdown replies to Telegram HTML before sending (parse_mode=HTML),
+// so callers may safely emit fenced code blocks with language hints,
+// inline backticks, and other rich formatting.
 func (b *Backend) MarkdownFlavor() backend.MarkdownFlavor {
-	return backend.MarkdownNone
+	return backend.MarkdownFull
 }
 
 // --- internal ---
