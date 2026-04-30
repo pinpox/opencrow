@@ -63,7 +63,7 @@ func TestWorker_PiSurvivesItemContext(t *testing.T) {
 	// the prompt completes.
 	itemCtx, cancel := context.WithCancel(context.Background())
 
-	pi, reply, err := w.sendWithRetry(itemCtx, "hello")
+	pi, reply, err := w.sendWithRetry(itemCtx, "hello", nil)
 	if err != nil || reply != "ok" {
 		t.Fatalf("sendWithRetry = (%q, %v), want (ok, nil)", reply, err)
 	}
@@ -83,7 +83,7 @@ func TestWorker_PiSurvivesItemContext(t *testing.T) {
 	// A follow-up prompt must reuse the existing process, not respawn.
 	// On eve the dead process triggered sendWithRetry's "pi exited,
 	// starting fresh process" path on every message.
-	pi2, _, err := w.sendWithRetry(t.Context(), "again")
+	pi2, _, err := w.sendWithRetry(t.Context(), "again", nil)
 	if err != nil {
 		t.Fatalf("second sendWithRetry: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestWorker_StopPiKillsProcessTree(t *testing.T) {
 
 	w := newFakePiWorker(t)
 
-	_, _, err := w.sendWithRetry(t.Context(), "spawn-child")
+	_, _, err := w.sendWithRetry(t.Context(), "spawn-child", nil)
 	if err != nil {
 		t.Fatalf("sendWithRetry: %v", err)
 	}

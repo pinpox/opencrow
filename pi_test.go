@@ -108,7 +108,7 @@ func TestWaitForResult_RetryRescindsError(t *testing.T) {
 		ch <- rpcParsed{event: e}
 	}
 
-	reply, err := p.waitForResult(t.Context())
+	reply, err := p.waitForResult(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("waitForResult: %v", err)
 	}

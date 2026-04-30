@@ -61,5 +61,14 @@ type Message struct {
 	ReplyToID      string // backend-specific ID of the message being replied to (empty if not a reply)
 }
 
+// Streamer is an optional interface backends can implement to support
+// streaming text deltas during generation. Backends that don't implement
+// this fall back to buffered SendMessage.
+type Streamer interface {
+	// SendDelta sends an incremental text fragment for an in-progress message.
+	// messageID identifies the message being built (same across all deltas).
+	SendDelta(ctx context.Context, conversationID string, messageID string, delta string)
+}
+
 // MessageHandler is a callback invoked by the backend for each inbound user message.
 type MessageHandler func(ctx context.Context, msg Message)

@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"net"
@@ -81,24 +82,38 @@ func dial(t *testing.T, sockPath string) net.Conn {
 	return conn
 }
 
-func readEvent(t *testing.T, conn net.Conn) event {
+// connScanner wraps a net.Conn with a bufio.Scanner for NDJSON reading.
+// Reuse across readEvent calls to avoid losing buffered data.
+type connScanner struct {
+	sc *bufio.Scanner
+}
+
+func newConnScanner(conn net.Conn) *connScanner {
+	return &connScanner{sc: bufio.NewScanner(conn)}
+}
+
+func (cs *connScanner) readEvent(t *testing.T, conn net.Conn) event {
 	t.Helper()
 
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 
-	buf := make([]byte, 4096)
-
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("read: %v", err)
+	if !cs.sc.Scan() {
+		t.Fatalf("read: %v", cs.sc.Err())
 	}
 
 	var ev event
-	if err := json.Unmarshal(buf[:n], &ev); err != nil {
-		t.Fatalf("unmarshal event: %v (raw: %s)", err, buf[:n])
+	if err := json.Unmarshal(cs.sc.Bytes(), &ev); err != nil {
+		t.Fatalf("unmarshal event: %v (raw: %s)", err, cs.sc.Text())
 	}
 
 	return ev
+}
+
+// readEvent is a convenience wrapper for tests that only read one event.
+func readEvent(t *testing.T, conn net.Conn) event {
+	t.Helper()
+
+	return newConnScanner(conn).readEvent(t, conn)
 }
 
 func sendCommand(t *testing.T, conn net.Conn, cmd command) {
@@ -317,4 +332,48 @@ func TestSendFile_Command(t *testing.T) {
 	if received[0].Text == "" {
 		t.Error("handler Text should contain attachment text")
 	}
+}
+
+func TestSendDelta_StreamsToClients(t *testing.T) {
+	t.Parallel()
+
+	b, sockPath, cancel := startBackend(t, func(_ context.Context, _ backend.Message) {})
+	defer cancel()
+
+	conn := dial(t, sockPath)
+	defer conn.Close()
+
+	cs := newConnScanner(conn)
+
+	// Send two deltas.
+	b.SendDelta(context.Background(), "local", "stream-1", "Hello")
+	b.SendDelta(context.Background(), "local", "stream-1", " world")
+
+	ev1 := cs.readEvent(t, conn)
+	if ev1.Kind != "delta" {
+		t.Fatalf("Kind = %q, want delta", ev1.Kind)
+	}
+
+	if ev1.Target != "stream-1" {
+		t.Errorf("Target = %q, want stream-1", ev1.Target)
+	}
+
+	if ev1.Text != "Hello" {
+		t.Errorf("Text = %q, want Hello", ev1.Text)
+	}
+
+	ev2 := cs.readEvent(t, conn)
+	if ev2.Text != " world" {
+		t.Errorf("Text = %q, want ' world'", ev2.Text)
+	}
+}
+
+func TestBackend_ImplementsStreamer(t *testing.T) {
+	t.Parallel()
+
+	b, _, cancel := startBackend(t, func(_ context.Context, _ backend.Message) {})
+	defer cancel()
+
+	// Verify the socket backend implements backend.Streamer.
+	var _ backend.Streamer = b
 }

@@ -355,7 +355,18 @@ func (w *Worker) processPrompt(ctx context.Context, item Inbox) bool {
 
 	taskStart := time.Now()
 
-	pi, reply, err := w.sendWithRetry(ctx, prompt)
+	// Stream text deltas to the client if the backend supports it.
+	var onDelta func(string)
+
+	if streamer, ok := w.be.(backend.Streamer); ok {
+		streamID := fmt.Sprintf("stream-%d", time.Now().UnixNano())
+
+		onDelta = func(delta string) {
+			streamer.SendDelta(ctx, convID, streamID, delta)
+		}
+	}
+
+	pi, reply, err := w.sendWithRetry(ctx, prompt, onDelta)
 	if err != nil {
 		killPi := pi != nil
 
@@ -487,13 +498,14 @@ func wasPreempted(ctx context.Context, err error) bool {
 
 // sendWithRetry sends a prompt to pi, retrying once with a fresh
 // process if the first attempt fails due to a stale/crashed process.
-func (w *Worker) sendWithRetry(ctx context.Context, prompt string) (*PiProcess, string, error) {
+// onDelta, if non-nil, is called with each text delta during generation.
+func (w *Worker) sendWithRetry(ctx context.Context, prompt string, onDelta func(string)) (*PiProcess, string, error) {
 	pi, err := w.ensurePi(ctx)
 	if err != nil {
 		return nil, "", err
 	}
 
-	reply, err := pi.sendAndWait(ctx, prompt)
+	reply, err := pi.sendAndWait(ctx, prompt, onDelta)
 	if err == nil {
 		return pi, reply, nil
 	}
@@ -511,7 +523,7 @@ func (w *Worker) sendWithRetry(ctx context.Context, prompt string) (*PiProcess, 
 		return nil, "", err
 	}
 
-	reply, err = pi.sendAndWait(ctx, prompt)
+	reply, err = pi.sendAndWait(ctx, prompt, onDelta)
 
 	return pi, reply, err
 }
@@ -599,7 +611,7 @@ func (w *Worker) readHeartbeatFile() string {
 func (w *Worker) retryEmptyResponse(ctx context.Context, pi *PiProcess) string {
 	slog.Warn("worker: empty response, re-prompting for summary")
 
-	reply, err := pi.sendAndWait(ctx, "You just completed a task but your response contained no text for the user. Please briefly summarize what you did or respond to the user's message.")
+	reply, err := pi.sendAndWait(ctx, "You just completed a task but your response contained no text for the user. Please briefly summarize what you did or respond to the user's message.", nil)
 	if err != nil {
 		slog.Error("worker: re-prompt failed", "error", err)
 

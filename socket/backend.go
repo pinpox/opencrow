@@ -222,6 +222,16 @@ func (b *Backend) SendMessage(_ context.Context, _ string, text string, replyToI
 	return id
 }
 
+// SendDelta sends an incremental text fragment for a streaming message.
+func (b *Backend) SendDelta(_ context.Context, _ string, messageID string, delta string) {
+	b.push(event{
+		Kind:      "delta",
+		Streaming: true,
+		Target:    messageID,
+		Text:      delta,
+	})
+}
+
 // SendFile sends a file path reference to connected clients.
 func (b *Backend) SendFile(_ context.Context, _ string, filePath string) error {
 	id := b.nextID()
