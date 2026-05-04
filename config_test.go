@@ -80,10 +80,16 @@ func TestLoadConfig_Errors(t *testing.T) {
 			name: "unknown backend",
 			env: func() map[string]string {
 				m := baseMatrixEnv()
-				m["OPENCROW_BACKEND"] = "telegram"
+				m["OPENCROW_BACKEND"] = "discord"
 
 				return m
 			}(),
+		},
+		{
+			name: "telegram missing token",
+			env: map[string]string{
+				"OPENCROW_BACKEND": "telegram",
+			},
 		},
 		{
 			name: "nostr missing private key",
@@ -240,6 +246,79 @@ func TestSocketConfig_CustomValues(t *testing.T) {
 
 	if cfg.Socket.Name != "MyBot" {
 		t.Errorf("Name = %q, want MyBot", cfg.Socket.Name)
+	}
+}
+
+func TestTelegramConfig_Defaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(testEnv(map[string]string{
+		"OPENCROW_BACKEND":        "telegram",
+		"OPENCROW_TELEGRAM_TOKEN": "123:ABC",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	if cfg.BackendType != backendTelegram {
+		t.Errorf("BackendType = %q, want %q", cfg.BackendType, backendTelegram)
+	}
+
+	if cfg.Telegram.Token != "123:ABC" {
+		t.Errorf("Token = %q, want %q", cfg.Telegram.Token, "123:ABC")
+	}
+
+	if cfg.Telegram.APIBase != "" {
+		t.Errorf("APIBase = %q, want empty (backend applies its own default)", cfg.Telegram.APIBase)
+	}
+}
+
+func TestTelegramConfig_TokenFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+
+	if err := os.WriteFile(tokenPath, []byte("  789:XYZ \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(testEnv(map[string]string{
+		"OPENCROW_BACKEND":             "telegram",
+		"OPENCROW_TELEGRAM_TOKEN_FILE": tokenPath,
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	if cfg.Telegram.Token != "789:XYZ" {
+		t.Errorf("Token = %q, want %q (whitespace trimmed)", cfg.Telegram.Token, "789:XYZ")
+	}
+}
+
+func TestTelegramConfig_AllowedUsersOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(testEnv(map[string]string{
+		"OPENCROW_BACKEND":                 "telegram",
+		"OPENCROW_TELEGRAM_TOKEN":          "1:abc",
+		"OPENCROW_ALLOWED_USERS":           "shared",
+		"OPENCROW_TELEGRAM_ALLOWED_USERS":  "12345, @alice",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	if _, ok := cfg.Telegram.AllowedUsers["12345"]; !ok {
+		t.Errorf("expected 12345 in allowlist, got %v", cfg.Telegram.AllowedUsers)
+	}
+
+	if _, ok := cfg.Telegram.AllowedUsers["@alice"]; !ok {
+		t.Errorf("expected @alice in allowlist, got %v", cfg.Telegram.AllowedUsers)
+	}
+
+	if _, ok := cfg.Telegram.AllowedUsers["shared"]; ok {
+		t.Errorf("telegram-specific allowlist should override generic one, got %v", cfg.Telegram.AllowedUsers)
 	}
 }
 

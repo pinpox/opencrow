@@ -18,6 +18,7 @@ import (
 	nostrbackend "github.com/pinpox/opencrow/nostr"
 	signalbackend "github.com/pinpox/opencrow/signal"
 	socketbackend "github.com/pinpox/opencrow/socket"
+	telegrambackend "github.com/pinpox/opencrow/telegram"
 	// Register the pure-Go SQLite driver.
 	_ "modernc.org/sqlite"
 )
@@ -231,6 +232,8 @@ func createBackend(ctx context.Context, cfg *Config, handler backend.MessageHand
 		return createSignalBackend(cfg, handler)
 	case backendSocket:
 		return createSocketBackend(cfg, handler)
+	case backendTelegram:
+		return createTelegramBackend(cfg, handler)
 	default:
 		return nil, fmt.Errorf("unsupported backend type: %q", cfg.BackendType)
 	}
@@ -318,6 +321,23 @@ func createSocketBackend(cfg *Config, handler backend.MessageHandler) (*socketba
 	}, handler)
 	if err != nil {
 		return nil, fmt.Errorf("creating socket backend: %w", err)
+	}
+
+	return b, nil
+}
+
+func createTelegramBackend(cfg *Config, handler backend.MessageHandler) (*telegrambackend.Backend, error) {
+	tgCfg := telegrambackend.Config{
+		Token:          cfg.Telegram.Token,
+		APIBase:        cfg.Telegram.APIBase,
+		AllowedUsers:   cfg.Telegram.AllowedUsers,
+		SessionBaseDir: cfg.Pi.SessionDir,
+		PollTimeout:    cfg.Telegram.PollTimeout,
+	}
+
+	b, err := telegrambackend.New(tgCfg, handler)
+	if err != nil {
+		return nil, fmt.Errorf("creating telegram backend: %w", err)
 	}
 
 	return b, nil

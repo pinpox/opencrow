@@ -9,6 +9,7 @@ Set `OPENCROW_BACKEND` to choose the messaging backend. Defaults to `matrix`.
 | `matrix` | Matrix rooms via mautrix (default, backwards compatible) |
 | `nostr` | Nostr NIP-17 encrypted DMs |
 | `signal` | Signal chats via signal-cli |
+| `telegram` | Telegram Bot API (long polling) |
 
 ## Bot commands
 
@@ -27,7 +28,7 @@ Send these as plain text messages in any conversation with the bot:
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENCROW_BACKEND` | `matrix` | Messaging backend (`matrix`, `nostr`, or `signal`) |
+| `OPENCROW_BACKEND` | `matrix` | Messaging backend (`matrix`, `nostr`, `signal`, `socket`, or `telegram`) |
 | `OPENCROW_PI_BINARY` | `pi` | Path to the pi binary |
 | `OPENCROW_PI_SESSION_DIR` | `/var/lib/opencrow/sessions` | Session data directory |
 | `OPENCROW_PI_PROVIDER` | `anthropic` | LLM provider |
@@ -115,6 +116,29 @@ sudo opencrow-signal-cli -a +12025550123 finishLink
 
 Once linked, set `OPENCROW_SIGNAL_ACCOUNT = "+12025550123"` and start the
 service. The account data persists in `OPENCROW_SIGNAL_CONFIG_DIR`.
+
+## Telegram configuration
+
+OpenCrow uses the Telegram Bot API in long-polling mode, so no public HTTPS
+endpoint is needed. Create a bot with [@BotFather](https://t.me/BotFather) to
+obtain a token.
+
+| Variable | Required | Description |
+|---|---|---|
+| `OPENCROW_TELEGRAM_TOKEN` | Yes* | Bot token from @BotFather (e.g. `123456:ABC-DEF...`) |
+| `OPENCROW_TELEGRAM_TOKEN_FILE` | Yes* | Path to a file containing the bot token (preferred for secrets) |
+| `OPENCROW_TELEGRAM_API_BASE` | No | Override the API base URL (default `https://api.telegram.org`) |
+| `OPENCROW_TELEGRAM_POLL_TIMEOUT` | No | Long-poll timeout duration (default `25s`) |
+| `OPENCROW_TELEGRAM_ALLOWED_USERS` | No | Comma-separated user IDs (numeric) and/or `@usernames` permitted to interact. Falls back to `OPENCROW_ALLOWED_USERS` when unset. |
+
+*Either `OPENCROW_TELEGRAM_TOKEN` or `OPENCROW_TELEGRAM_TOKEN_FILE` is required.
+
+By default the bot replies to anyone who messages it. Restrict access with
+`OPENCROW_TELEGRAM_ALLOWED_USERS` — find your numeric ID by messaging
+[@userinfobot](https://t.me/userinfobot) (or any "what's my id" bot).
+
+The bot privacy mode applied by @BotFather affects which messages the bot
+sees in groups. For 1:1 chats no extra setup is needed.
 
 ## Secrets and authentication
 

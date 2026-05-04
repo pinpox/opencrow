@@ -16,10 +16,11 @@ OpenCrow supports multiple messaging backends:
 - **Matrix** — E2EE chat rooms via mautrix
 - **Nostr** — NIP-17 encrypted DMs via go-nostr
 - **Signal** — Signal chats via `signal-cli`
+- **Telegram** — Telegram Bot API (long polling)
 
 ```mermaid
 graph LR
-    Transport[Matrix / Nostr / Signal] -->|message| Inbox[(Inbox)]
+    Transport[Matrix / Nostr / Signal / Telegram] -->|message| Inbox[(Inbox)]
     Heartbeat -->|timer| Inbox
     Reminders[(reminders)] -->|due| Inbox
     Trigger["trigger.pipe"] -->|external| Inbox

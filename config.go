@@ -13,18 +13,20 @@ import (
 )
 
 const (
-	backendMatrix = "matrix"
-	backendNostr  = "nostr"
-	backendSignal = "signal"
-	backendSocket = "socket"
+	backendMatrix   = "matrix"
+	backendNostr    = "nostr"
+	backendSignal   = "signal"
+	backendSocket   = "socket"
+	backendTelegram = "telegram"
 )
 
 type Config struct {
-	BackendType string // backendMatrix, backendNostr, backendSignal, or backendSocket
+	BackendType string // backendMatrix, backendNostr, backendSignal, backendSocket, or backendTelegram
 	Matrix      MatrixConfig
 	Nostr       NostrConfig
 	Signal      SignalConfig
 	Socket      SocketConfig
+	Telegram    TelegramConfig
 	Pi          PiConfig
 	Heartbeat   HeartbeatConfig
 }
@@ -32,6 +34,13 @@ type Config struct {
 type SocketConfig struct {
 	SocketPath string
 	Name       string
+}
+
+type TelegramConfig struct {
+	Token        string
+	APIBase      string
+	AllowedUsers map[string]struct{}
+	PollTimeout  time.Duration
 }
 
 type HeartbeatConfig struct {
@@ -102,10 +111,10 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 	backendType := env.or("OPENCROW_BACKEND", backendMatrix)
 
 	switch backendType {
-	case backendMatrix, backendNostr, backendSignal, backendSocket:
+	case backendMatrix, backendNostr, backendSignal, backendSocket, backendTelegram:
 		// valid
 	default:
-		return nil, fmt.Errorf("OPENCROW_BACKEND=%q is not supported (valid: matrix, nostr, signal, socket)", backendType)
+		return nil, fmt.Errorf("OPENCROW_BACKEND=%q is not supported (valid: matrix, nostr, signal, socket, telegram)", backendType)
 	}
 
 	idleTimeout, err := env.duration("OPENCROW_PI_IDLE_TIMEOUT", 30*time.Minute)
@@ -118,6 +127,11 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 	workingDir := env.or("OPENCROW_PI_WORKING_DIR", "/var/lib/opencrow")
 
 	heartbeatInterval, err := env.duration("OPENCROW_HEARTBEAT_INTERVAL", 0)
+	if err != nil {
+		return nil, err
+	}
+
+	telegramCfg, err := loadTelegramConfig(env, allowedUsers)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +152,7 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 			SocketPath: env.or("OPENCROW_SOCKET_PATH", filepath.Join(workingDir, "sessions", "chat.sock")),
 			Name:       env.or("OPENCROW_SOCKET_NAME", "OpenCrow"),
 		},
+		Telegram: telegramCfg,
 		Pi: PiConfig{
 			BinaryPath:    env.or("OPENCROW_PI_BINARY", "pi"),
 			SessionDir:    env.or("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
@@ -178,6 +193,8 @@ func (cfg *Config) validateBackend(env envReader) error {
 		return cfg.Signal.validate()
 	case backendSocket:
 		// socket has sensible defaults, no validation needed
+	case backendTelegram:
+		return cfg.Telegram.validate()
 	}
 
 	return nil
@@ -189,6 +206,50 @@ func (m MatrixConfig) validate() error {
 		requireField(m.UserID, "OPENCROW_MATRIX_USER_ID"),
 		requireField(m.AccessToken, "OPENCROW_MATRIX_ACCESS_TOKEN"),
 	)
+}
+
+func loadTelegramConfig(env envReader, allowedUsers map[string]struct{}) (TelegramConfig, error) {
+	token, err := loadTelegramToken(env)
+	if err != nil {
+		return TelegramConfig{}, err
+	}
+
+	pollTimeout, err := env.duration("OPENCROW_TELEGRAM_POLL_TIMEOUT", 0)
+	if err != nil {
+		return TelegramConfig{}, err
+	}
+
+	telegramAllowed := allowedUsers
+	if raw := env.list("OPENCROW_TELEGRAM_ALLOWED_USERS"); len(raw) > 0 {
+		telegramAllowed = parseAllowedUsers(raw)
+	}
+
+	return TelegramConfig{
+		Token:        token,
+		APIBase:      env.str("OPENCROW_TELEGRAM_API_BASE"),
+		AllowedUsers: telegramAllowed,
+		PollTimeout:  pollTimeout,
+	}, nil
+}
+
+// loadTelegramToken reads the bot token from OPENCROW_TELEGRAM_TOKEN_FILE
+// (preferred) or OPENCROW_TELEGRAM_TOKEN. Empty is allowed at load time;
+// validate() enforces the requirement when telegram is the active backend.
+func loadTelegramToken(env envReader) (string, error) {
+	if path := env.str("OPENCROW_TELEGRAM_TOKEN_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("reading OPENCROW_TELEGRAM_TOKEN_FILE: %w", err)
+		}
+
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	return env.str("OPENCROW_TELEGRAM_TOKEN"), nil
+}
+
+func (t TelegramConfig) validate() error {
+	return requireField(t.Token, "OPENCROW_TELEGRAM_TOKEN")
 }
 
 func loadSignalConfig(env envReader, workingDir string, allowedUsers map[string]struct{}) SignalConfig {

@@ -197,6 +197,7 @@ let
                 "nostr"
                 "signal"
                 "socket"
+                "telegram"
               ];
               default = "matrix";
               description = "Messaging backend to use.";
@@ -300,6 +301,30 @@ let
               type = lib.types.str;
               default = "";
               description = "Bot profile picture URL (NIP-01 kind 0 'picture' field).";
+            };
+
+            OPENCROW_TELEGRAM_TOKEN_FILE = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Path to file containing the Telegram bot token. Required when backend is telegram (unless token is in environment file).";
+            };
+
+            OPENCROW_TELEGRAM_API_BASE = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Override the Telegram Bot API base URL. Empty uses https://api.telegram.org.";
+            };
+
+            OPENCROW_TELEGRAM_POLL_TIMEOUT = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Long-poll timeout for getUpdates (Go duration, e.g. 25s). Empty uses backend default.";
+            };
+
+            OPENCROW_TELEGRAM_ALLOWED_USERS = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Comma-separated Telegram user IDs (numeric) or @usernames allowed to interact. Empty allows everyone.";
             };
 
             OPENCROW_PI_PROVIDER = lib.mkOption {
@@ -480,6 +505,15 @@ let
             || (builtins.length icfg.environmentFiles) > 0
             || icfg.credentialFiles != { };
           message = "services.opencrow (${name}): OPENCROW_NOSTR_PRIVATE_KEY_FILE, environmentFiles, or credentialFiles is required when OPENCROW_BACKEND is nostr.";
+        }
+        {
+          assertion =
+            icfg.environment.OPENCROW_BACKEND != "telegram"
+            || icfg.environment.OPENCROW_TELEGRAM_TOKEN_FILE != ""
+            # Token may also be provided via environmentFiles or credentialFiles
+            || (builtins.length icfg.environmentFiles) > 0
+            || icfg.credentialFiles != { };
+          message = "services.opencrow (${name}): OPENCROW_TELEGRAM_TOKEN_FILE, environmentFiles, or credentialFiles is required when OPENCROW_BACKEND is telegram.";
         }
       ];
 
