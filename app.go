@@ -63,17 +63,23 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	// Record the incoming message so future reply-to references can quote it.
 	a.outbox.Put(ctx, msg.ConversationID, msg.MessageID, msg.Text)
 
-	switch strings.TrimSpace(msg.Text) {
-	case "!help":
+	text := strings.TrimSpace(msg.Text)
+
+	switch {
+	case text == "!help":
 		a.handleHelp(ctx, msg)
-	case "!restart":
+	case text == "!restart":
 		a.handleRestart(ctx, msg)
-	case "!stop":
+	case text == "!stop":
 		a.handleStop(ctx, msg)
-	case "!compact":
+	case text == "!compact":
 		a.handleCompact(ctx, msg)
-	case "!skills":
+	case text == "!skills":
 		a.handleSkills(ctx, msg)
+	case text == "!models":
+		a.handleModels(ctx, msg)
+	case text == "!model" || strings.HasPrefix(text, "!model "):
+		a.handleModel(ctx, msg, strings.TrimSpace(strings.TrimPrefix(text, "!model")))
 	default:
 		a.handlePrompt(ctx, msg)
 	}
@@ -85,7 +91,9 @@ func (a *App) handleHelp(ctx context.Context, msg backend.Message) {
 		"  !restart — Kill the current session and start fresh\n" +
 		"  !stop    — Abort the currently running agent turn\n" +
 		"  !compact — Compact conversation context to reduce token usage\n" +
-		"  !skills  — List loaded skills"
+		"  !skills  — List loaded skills\n" +
+		"  !models  — List available models\n" +
+		"  !model <provider>/<id> — Switch to the given model"
 	a.backend.SendMessage(ctx, msg.ConversationID, help, "")
 }
 
@@ -130,6 +138,81 @@ func (a *App) handleCompact(ctx context.Context, msg backend.Message) {
 
 func (a *App) handleSkills(ctx context.Context, msg backend.Message) {
 	a.backend.SendMessage(ctx, msg.ConversationID, a.worker.SkillsSummary(), "")
+}
+
+// handleModels lists pi's configured models as a single text reply,
+// marking the active one with a leading asterisk. Works on any backend
+// because it only uses SendMessage; the socket backend additionally
+// exposes the same data as a structured 'models' event for its GUI.
+func (a *App) handleModels(ctx context.Context, msg backend.Message) {
+	models, err := a.worker.ListModels(ctx)
+	if err != nil {
+		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Failed to list models: %v", err), "")
+
+		return
+	}
+
+	if len(models) == 0 {
+		a.backend.SendMessage(ctx, msg.ConversationID, "No models configured.", "")
+
+		return
+	}
+
+	var sb strings.Builder
+
+	sb.WriteString("Available models (* = active):\n")
+
+	for _, m := range models {
+		marker := "  "
+		if m.Active {
+			marker = "* "
+		}
+
+		fmt.Fprintf(&sb, "%s%s/%s\n", marker, m.Provider, m.ID)
+	}
+
+	a.backend.SendMessage(ctx, msg.ConversationID, strings.TrimRight(sb.String(), "\n"), "")
+}
+
+// handleModel switches pi to the requested model. arg is the substring
+// that followed "!model" with surrounding whitespace stripped; it is
+// required to be "<provider>/<id>". The slash form mirrors the protocol
+// shape (provider + modelId) and is unambiguous even when the same id
+// is registered under multiple providers.
+func (a *App) handleModel(ctx context.Context, msg backend.Message, arg string) {
+	if arg == "" {
+		a.backend.SendMessage(ctx, msg.ConversationID,
+			"Usage: !model <provider>/<id>. Use !models to list available models.", "")
+
+		return
+	}
+
+	provider, id, ok := strings.Cut(arg, "/")
+	if !ok || provider == "" || id == "" {
+		a.backend.SendMessage(ctx, msg.ConversationID,
+			"Invalid model spec. Use !model <provider>/<id> (e.g. !model openai/gpt-4).", "")
+
+		return
+	}
+
+	model, err := a.worker.SetModel(ctx, provider, id)
+	if err != nil {
+		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Failed to set model: %v", err), "")
+
+		return
+	}
+
+	// Push the post-switch list to any GUI clients on this backend so
+	// their dropdowns reconcile without a manual reopen. Synchronous is
+	// fine: handleModel runs on a backend-handler goroutine, not the
+	// worker's drain loop, so BroadcastModels' inbox round-trip won't
+	// deadlock. Backends without a structured model UI (matrix, nostr,
+	// signal) don't implement modelsBroadcaster and the call is skipped.
+	if mb, ok := a.backend.(modelsBroadcaster); ok {
+		mb.BroadcastModels(ctx)
+	}
+
+	a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Model switched to %s/%s.", model.Provider, model.ID), "")
 }
 
 func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {

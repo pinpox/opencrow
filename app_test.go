@@ -2,22 +2,27 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pinpox/opencrow/backend"
 )
 
 const testRoom = "!room1"
 
-// mockBackend records calls for testing.
+// mockBackend records calls for testing. It also implements
+// modelsBroadcaster so handlers that opportunistically push model
+// updates (handleModel) can be observed.
 type mockBackend struct {
 	mu                    sync.Mutex
 	sentMessages          []sentMessage
 	sentFiles             []sentFile
 	typingCalls           []typingCall
 	resetCalls            []string
+	broadcastCtxs         []context.Context
 	systemPromptExtraText string
 	markdownFlavor        backend.MarkdownFlavor
 }
@@ -79,6 +84,15 @@ func (m *mockBackend) SystemPromptExtra() string {
 
 func (m *mockBackend) MarkdownFlavor() backend.MarkdownFlavor {
 	return m.markdownFlavor
+}
+
+// BroadcastModels satisfies modelsBroadcaster. It records the ctx so
+// tests can assert the call happened and was passed a real context.
+func (m *mockBackend) BroadcastModels(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.broadcastCtxs = append(m.broadcastCtxs, ctx)
 }
 
 // newTestApp creates a mockBackend + App wired together for testing.
@@ -285,4 +299,228 @@ func TestFormatToolCall(t *testing.T) {
 	check(bash, backend.MarkdownNone, "🔧 ls -la")
 	check(read, backend.MarkdownBasic, "📄 reading `/etc/hosts`")
 	check(read, backend.MarkdownNone, "📄 reading /etc/hosts")
+}
+
+// newFakePiApp wires App + a fake-pi-backed Worker on a shared in-memory
+// DB and starts worker.Run in a goroutine. Handlers that go through the
+// inbox (ListModels, SetModel, prompt) all dispatch against the same
+// store. Cleanup cancels Run and stops pi.
+func newFakePiApp(t *testing.T) (*App, *mockBackend) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	db := newTestDB(ctx, t)
+	inbox := newTestInboxWithDB(ctx, t, db)
+
+	script, err := filepath.Abs("testdata/fake-pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+
+	worker := NewWorker(inbox, PiConfig{
+		BinaryPath: "bash",
+		BinaryArgs: []string{script},
+		SessionDir: dir,
+		WorkingDir: dir,
+	}, "", "")
+	t.Cleanup(worker.stopPi)
+
+	mb := &mockBackend{}
+	worker.SetBackend(mb)
+	worker.SetRoomID(testRoom)
+
+	app := NewApp(mb, worker, inbox, db)
+	worker.SetApp(app)
+
+	go worker.Run(ctx)
+
+	return app, mb
+}
+
+// TestApp_ModelsCommand exercises the !models chat command end-to-end
+// against the fake-pi stub: the worker cold-spawns pi, ListModels merges
+// get_state into get_available_models, and the App formats the result
+// as a single text reply. This is the path matrix/signal/nostr clients
+// take — they have no structured 'models' event, only chat text.
+func TestApp_ModelsCommand(t *testing.T) {
+	t.Parallel()
+
+	app, mb := newFakePiApp(t)
+	sendCommand(app, "!models")
+
+	msg := waitForReply(t, mb)
+
+	for _, want := range []string{"local/qwen3", "local/gpt-oss", "* local/qwen3"} {
+		if !strings.Contains(msg.text, want) {
+			t.Errorf("reply %q missing %q", msg.text, want)
+		}
+	}
+}
+
+// TestApp_ModelCommand covers !model dispatch: argument parsing, the
+// success path (response echoes the new active model), and the two
+// usage-error paths that short-circuit before touching the worker.
+func TestApp_ModelCommand(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		command      string
+		wantContains string
+		// hitsWorker is true when the case is expected to round-trip
+		// through pi (success path). False cases reject in-process.
+		hitsWorker bool
+	}{
+		{"no arg", "!model", "Usage: !model", false},
+		{"missing slash", "!model qwen3", "Invalid model spec", false},
+		{"empty provider", "!model /qwen3", "Invalid model spec", false},
+		{"empty id", "!model local/", "Invalid model spec", false},
+		{"success", "!model local/gpt-oss", "Model switched to local/gpt-oss", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			app, mb := newFakePiApp(t)
+			sendCommand(app, tc.command)
+
+			msg := waitForReply(t, mb)
+
+			if !strings.Contains(msg.text, tc.wantContains) {
+				t.Errorf("reply %q missing %q", msg.text, tc.wantContains)
+			}
+
+			_ = tc.hitsWorker // documents intent; no further assert needed.
+		})
+	}
+}
+
+// waitForReply blocks until mockBackend has received at least one
+// SendMessage and returns it. Model commands go through the inbox so
+// the reply lands asynchronously after worker.Run dispatches.
+func waitForReply(t *testing.T, mb *mockBackend) sentMessage {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mb.mu.Lock()
+		n := len(mb.sentMessages)
+		mb.mu.Unlock()
+
+		if n > 0 {
+			break
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if len(mb.sentMessages) == 0 {
+		t.Fatal("no reply received within deadline")
+	}
+
+	return mb.sentMessages[0]
+}
+
+// waitForBroadcastCount blocks until mockBackend has recorded `want`
+// BroadcastModels calls or a deadline expires. Used to synchronize
+// against the worker's async post-spawn broadcast goroutine.
+func waitForBroadcastCount(t *testing.T, mb *mockBackend, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mb.mu.Lock()
+		n := len(mb.broadcastCtxs)
+		mb.mu.Unlock()
+
+		if n >= want {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	t.Fatalf("BroadcastModels count = %d, want >= %d", len(mb.broadcastCtxs), want)
+}
+
+// TestApp_ModelCommand_BroadcastsOnSuccess covers the multi-client GUI
+// case: after a successful !model switch, the App pushes a fresh model
+// list to other connected clients so dropdowns reconcile without a
+// manual reopen. The mockBackend satisfies modelsBroadcaster; matrix /
+// signal / nostr don't, and for them the call is silently skipped (a
+// separate test isn't necessary because not implementing the interface
+// is the absence of behavior).
+func TestApp_ModelCommand_BroadcastsOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	app, mb := newFakePiApp(t)
+
+	// Warm pi up first. The worker's ensurePi hook fires an async
+	// broadcast on cold-spawn (existing behaviour from the socket feature
+	// commit). Wait for that to land before snapshotting, so the count we
+	// observe after !model isolates the broadcast handleModel itself
+	// triggers.
+	sendCommand(app, "!models")
+
+	_ = waitForReply(t, mb)
+
+	waitForBroadcastCount(t, mb, 1)
+
+	mb.mu.Lock()
+	before := len(mb.broadcastCtxs)
+	mb.sentMessages = nil
+	mb.mu.Unlock()
+
+	sendCommand(app, "!model local/qwen3")
+
+	// The confirmation reply is sent after BroadcastModels, so observing
+	// the reply means handleModel's broadcast already happened. Pi is
+	// already alive at this point so ensurePi does NOT fire its own
+	// spawn broadcast — anything past `before` came from handleModel.
+	_ = waitForReply(t, mb)
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	gained := len(mb.broadcastCtxs) - before
+	if gained != 1 {
+		t.Fatalf("handleModel triggered %d BroadcastModels calls, want 1 (before=%d, after=%d)",
+			gained, before, len(mb.broadcastCtxs))
+	}
+
+	if mb.broadcastCtxs[len(mb.broadcastCtxs)-1] == nil {
+		t.Fatal("BroadcastModels received a nil context")
+	}
+}
+
+// TestApp_ModelCommand_NoBroadcastOnFailure asserts the broadcast is
+// skipped when set-model fails (bad provider/id, pi rejects, etc.) —
+// pushing stale state to all clients on a failed switch would be worse
+// than the original problem.
+func TestApp_ModelCommand_NoBroadcastOnFailure(t *testing.T) {
+	t.Parallel()
+
+	app, mb := newFakePiApp(t)
+	// Invalid spec rejects in-process before worker.SetModel is called.
+	sendCommand(app, "!model qwen3")
+
+	_ = waitForReply(t, mb)
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if len(mb.broadcastCtxs) != 0 {
+		t.Fatalf("BroadcastModels called %d times on failure, want 0", len(mb.broadcastCtxs))
+	}
 }
