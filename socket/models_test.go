@@ -12,16 +12,19 @@ import (
 
 // Test fixtures used across model tests.
 const (
-	testProvider = "local"
-	testModelID  = "qwen3"
+	testProvider   = "local"
+	testModelID    = "qwen3"
+	testAltModelID = "gpt-oss"
 )
 
 // stubModelService is a test double for the ModelService interface.
+// SetModel is stateful: it updates the Active flag in `models` so a
+// subsequent ListModels (e.g. from BroadcastModels after a successful
+// switch) returns a list whose active marker matches what was just set.
 type stubModelService struct {
 	models     []backend.ModelInfo
 	listErr    error
 	setErr     error
-	lastSet    *backend.ModelInfo
 	setCallArg struct {
 		provider string
 		modelID  string
@@ -44,11 +47,22 @@ func (s *stubModelService) SetModel(_ context.Context, provider, modelID string)
 		return nil, s.setErr
 	}
 
-	if s.lastSet != nil {
-		return s.lastSet, nil
+	var active *backend.ModelInfo
+
+	for i := range s.models {
+		match := s.models[i].Provider == provider && s.models[i].ID == modelID
+		s.models[i].Active = match
+
+		if match {
+			active = &s.models[i]
+		}
 	}
 
-	return &backend.ModelInfo{Provider: provider, ID: modelID, ContextWindow: 4096}, nil
+	if active != nil {
+		return active, nil
+	}
+
+	return &backend.ModelInfo{Provider: provider, ID: modelID, ContextWindow: 4096, Active: true}, nil
 }
 
 func TestListModels_ReturnsModels(t *testing.T) {
@@ -57,7 +71,7 @@ func TestListModels_ReturnsModels(t *testing.T) {
 	svc := &stubModelService{
 		models: []backend.ModelInfo{
 			{Provider: testProvider, ID: testModelID, ContextWindow: 32768, Reasoning: false, Active: true},
-			{Provider: testProvider, ID: "gpt-oss", ContextWindow: 131072, Reasoning: true},
+			{Provider: testProvider, ID: testAltModelID, ContextWindow: 131072, Reasoning: true},
 		},
 	}
 
@@ -76,7 +90,7 @@ func TestListModels_ReturnsModels(t *testing.T) {
 
 	want := []backend.ModelInfo{
 		{Provider: testProvider, ID: testModelID, ContextWindow: 32768, Reasoning: false, Active: true},
-		{Provider: testProvider, ID: "gpt-oss", ContextWindow: 131072, Reasoning: true},
+		{Provider: testProvider, ID: testAltModelID, ContextWindow: 131072, Reasoning: true},
 	}
 
 	if !reflect.DeepEqual(ev.Models, want) {
@@ -110,10 +124,22 @@ func TestListModels_ServiceErrorEmitsError(t *testing.T) {
 	}
 }
 
+// TestSetModel_ForwardsToService asserts the success path: the service
+// is called with the requested provider+id, and the resulting broadcast
+// carries the full model list with Active=true only on the matching
+// entry. A single-entry partial update would leave clients that joined
+// before list-models replied with a one-entry view; we explicitly want
+// the full list so every dropdown can reconcile.
 func TestSetModel_ForwardsToService(t *testing.T) {
 	t.Parallel()
 
-	svc := &stubModelService{}
+	svc := &stubModelService{
+		models: []backend.ModelInfo{
+			{Provider: testProvider, ID: testModelID, ContextWindow: 32768, Active: true},
+			{Provider: testProvider, ID: testAltModelID, ContextWindow: 131072, Reasoning: true},
+			{Provider: testProvider, ID: "smollm", ContextWindow: 4096},
+		},
+	}
 
 	_, sockPath, cancel := startBackend(t, nil, svc)
 	defer cancel()
@@ -121,23 +147,30 @@ func TestSetModel_ForwardsToService(t *testing.T) {
 	conn := dial(t, sockPath)
 	defer conn.Close()
 
-	sendCommand(t, conn, command{Cmd: cmdSetModel, Provider: testProvider, ModelID: testModelID})
+	// Switch to a model that is not currently active so the broadcast
+	// has to flip the marker on two entries.
+	sendCommand(t, conn, command{Cmd: cmdSetModel, Provider: testProvider, ModelID: testAltModelID})
 
 	ev := readEvent(t, conn)
 	if ev.Kind != evModels {
 		t.Fatalf("kind = %q, want %q", ev.Kind, evModels)
 	}
 
-	if len(ev.Models) != 1 || !ev.Models[0].Active {
-		t.Fatalf("expected single active model, got %+v", ev.Models)
+	if len(ev.Models) != len(svc.models) {
+		t.Fatalf("broadcast carried %d models, want full list of %d: %+v",
+			len(ev.Models), len(svc.models), ev.Models)
 	}
 
-	if ev.Models[0].Provider != testProvider || ev.Models[0].ID != testModelID {
-		t.Fatalf("model = %+v, want provider=local id=qwen3", ev.Models[0])
+	for _, m := range ev.Models {
+		wantActive := m.Provider == testProvider && m.ID == testAltModelID
+		if m.Active != wantActive {
+			t.Errorf("model %s/%s: Active=%t, want %t", m.Provider, m.ID, m.Active, wantActive)
+		}
 	}
 
-	if svc.setCallArg.provider != testProvider || svc.setCallArg.modelID != testModelID {
-		t.Fatalf("service called with %+v, want provider=local modelID=qwen3", svc.setCallArg)
+	if svc.setCallArg.provider != testProvider || svc.setCallArg.modelID != testAltModelID {
+		t.Fatalf("service called with %+v, want provider=%s modelID=gpt-oss",
+			svc.setCallArg, testProvider)
 	}
 }
 
@@ -200,6 +233,54 @@ func TestBroadcastModels_PushesToAllClients(t *testing.T) {
 
 		if len(ev.Models) != 2 {
 			t.Fatalf("client %d: expected 2 models, got %+v", i, ev.Models)
+		}
+	}
+}
+
+// TestSetModel_BroadcastsToAllClients covers the multi-client GUI case:
+// one client switches model, every other connected client receives the
+// same full-list event so their dropdowns reconcile without a manual
+// reopen. This is the whole point of going through BroadcastModels
+// instead of pushing a one-entry partial update.
+func TestSetModel_BroadcastsToAllClients(t *testing.T) {
+	t.Parallel()
+
+	svc := &stubModelService{
+		models: []backend.ModelInfo{
+			{Provider: testProvider, ID: testModelID, ContextWindow: 32768, Active: true},
+			{Provider: testProvider, ID: testAltModelID, ContextWindow: 131072, Reasoning: true},
+		},
+	}
+
+	_, sockPath, cancel := startBackend(t, nil, svc)
+	defer cancel()
+
+	conn1 := dialSynced(t, sockPath)
+	defer conn1.Close()
+
+	conn2 := dialSynced(t, sockPath)
+	defer conn2.Close()
+
+	// Switch from conn1; both conn1 and conn2 must observe the broadcast.
+	sendCommand(t, conn1, command{Cmd: cmdSetModel, Provider: testProvider, ModelID: testAltModelID})
+
+	for i, conn := range []net.Conn{conn1, conn2} {
+		ev := readEvent(t, conn)
+		if ev.Kind != evModels {
+			t.Fatalf("client %d: kind = %q, want %q", i, ev.Kind, evModels)
+		}
+
+		if len(ev.Models) != len(svc.models) {
+			t.Fatalf("client %d: expected full list of %d models, got %+v",
+				i, len(svc.models), ev.Models)
+		}
+
+		for _, m := range ev.Models {
+			wantActive := m.Provider == testProvider && m.ID == testAltModelID
+			if m.Active != wantActive {
+				t.Errorf("client %d: model %s/%s: Active=%t, want %t",
+					i, m.Provider, m.ID, m.Active, wantActive)
+			}
 		}
 	}
 }

@@ -483,24 +483,20 @@ func (b *Backend) handleListModels(ctx context.Context, conn net.Conn) {
 }
 
 // handleSetModel forwards a set-model command to the model service.
-// On success the new active model is broadcast to every connected
-// client as a 'models' event with Active=true. On failure the
-// requesting client receives an error event. Validation (including
-// empty args) is left to pi: either the model exists and switches, or
-// it doesn't and pi reports why.
+// On success the worker has switched pi to the requested model and we
+// broadcast a fresh full list to every connected client so all dropdowns
+// reconcile their active marker — a partial single-entry push would leave
+// clients that connected late (or before list-models replied) with a
+// one-entry view. On failure the requesting client receives an error
+// event. Validation (including empty args) is left to pi: either the
+// model exists and switches, or it doesn't and pi reports why.
 func (b *Backend) handleSetModel(ctx context.Context, cmd command, conn net.Conn) {
-	model, err := b.models.SetModel(ctx, cmd.Provider, cmd.ModelID)
-	if err != nil {
+	if _, err := b.models.SetModel(ctx, cmd.Provider, cmd.ModelID); err != nil {
 		slog.Warn("socket: set model failed", "error", err, "provider", cmd.Provider, "modelId", cmd.ModelID)
 		b.pushTo(conn, event{Kind: evError, Text: "set-model failed: " + err.Error()})
 
 		return
 	}
 
-	// Broadcast the updated active model to all clients. Other clients
-	// match it against their cached list by (provider, id); the absence
-	// of the rest of the list here is intentional.
-	active := *model
-	active.Active = true
-	b.push(event{Kind: evModels, Models: []backend.ModelInfo{active}})
+	b.BroadcastModels(ctx)
 }
