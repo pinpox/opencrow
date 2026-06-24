@@ -21,13 +21,12 @@
 import {
   convertToLlm,
   serializeConversation,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
-import { complete } from "@mariozechner/pi-ai";
-import { Type } from "@sinclair/typebox";
+} from "@oh-my-pi/pi-coding-agent";
+import { complete } from "@oh-my-pi/pi-ai";
 
 const SEDIMENT_BIN = "@@SEDIMENT_BIN@@";
 const SEDIMENT_TIMEOUT = 10_000;
@@ -391,6 +390,8 @@ async function extractFacts(
 // ── extension ────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  const { Type } = pi.typebox;
+
   // Compaction summaries are the narrative layer — store whole.
   pi.on("session_compact", async (event) => {
     const summary = event.compactionEntry.summary?.trim();

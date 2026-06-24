@@ -14,8 +14,7 @@
  * cleanup is owned by the opencrow process.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 // Nix build substitutes the store path here. If the placeholder survives
 // (non-Nix install), fall back to PATH lookup.
@@ -87,6 +86,8 @@ export default function remindersExtension(pi: ExtensionAPI) {
     // missing we are running outside opencrow — silently skip.
     return;
   }
+
+  const { Type } = pi.typebox;
 
   async function sqlite(sql: string, signal?: AbortSignal): Promise<string> {
     const result = await pi.exec(

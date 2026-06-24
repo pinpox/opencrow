@@ -9,6 +9,7 @@ let
   cfg = config.services.opencrow;
 
   jsonFormat = pkgs.formats.json { };
+  yamlFormat = pkgs.formats.yaml { };
 
   # Derive container name and state directory from instance name.
   # The "default" instance (top-level enable) keeps the original
@@ -41,8 +42,8 @@ let
 
       piPackage = lib.mkOption {
         type = lib.types.package;
-        description = "The pi coding agent package. Required — typically from llm-agents.nix or similar.";
-        example = lib.literalExpression "llm-agents.packages.\${system}.pi";
+        description = "The omp (Oh My Pi) coding agent package. Required — typically from llm-agents.nix or similar.";
+        example = lib.literalExpression "llm-agents.packages.\${system}.omp";
       };
 
       signalCliPackage = lib.mkOption {
@@ -84,8 +85,8 @@ let
           - `false` to explicitly disable an extension
           - A path to a .ts file or directory containing an index.ts
 
-          All enabled extensions are written into a generated settings.json
-          that pi reads from PI_CODING_AGENT_DIR.
+          All enabled extensions are passed to omp via --extension
+          (opencrow exports OPENCROW_PI_EXTENSIONS for the bot to forward).
 
           Bundled extensions: `memory` (cross-session recall via sediment),
           `reminders` (remind_at/list/cancel tools backed by opencrow.db).
@@ -104,9 +105,9 @@ let
         type = jsonFormat.type;
         default = { };
         description = ''
-          Extra keys to include in the generated pi settings.json.
-          The `extensions` key is automatically populated from the
-          `extensions` option and should not be set here.
+          Extra keys to include in the generated omp config.yml (settings).
+          Extensions are NOT configured here — use the `extensions` option,
+          which opencrow loads via omp's --extension flag.
         '';
         example = lib.literalExpression ''
           {
@@ -120,12 +121,12 @@ let
         type = jsonFormat.type;
         default = { };
         description = ''
-          Contents of pi's models.json. Use this to add custom
+          Contents of omp's models.yml. Use this to add custom
           providers or override properties of built-in models via
           `modelOverrides` — most commonly `contextWindow` when the
-          configured API tier is narrower than pi's published value
+          configured API tier is narrower than omp's published value
           (e.g. Anthropic's long-context requires separate usage
-          credits). Without the override pi's auto-compaction never
+          credits). Without the override omp's auto-compaction never
           triggers and every turn bounces off a 429.
         '';
         example = lib.literalExpression ''
@@ -341,7 +342,7 @@ let
             OPENCROW_PI_SKILLS = lib.mkOption {
               type = lib.types.str;
               default = "";
-              description = "Comma-separated list of additional skill paths to pass to pi via --skill. Prefer using the top-level `skills` option instead.";
+              description = "Comma-separated list of additional skill paths. opencrow registers them with omp via a generated skills.customDirectories config overlay. Prefer using the top-level `skills` option instead.";
             };
 
             OPENCROW_PI_SKILLS_DIR = lib.mkOption {
@@ -426,14 +427,12 @@ let
         if value == true then self.packages.${pkgs.hostPlatform.system}."extension-${ename}" else value
       ) (lib.filterAttrs (_: v: v != false) icfg.extensions);
 
-      # Generate a settings.json for pi that lists declared extensions.
-      # Installed into PI_CODING_AGENT_DIR at service startup so pi
-      # auto-discovers them.
-      piSettingsJson = jsonFormat.generate "pi-settings-${name}.json" (
-        icfg.piSettings // { extensions = lib.attrValues resolvedExtensions; }
-      );
+      # omp loads extensions explicitly via --extension (opencrow passes
+      # them from OPENCROW_PI_EXTENSIONS); they are not auto-discovered from
+      # the agent dir. Settings/models are installed into PI_CODING_AGENT_DIR.
+      piConfigYml = yamlFormat.generate "omp-config-${name}.yml" icfg.piSettings;
 
-      piModelsJson = jsonFormat.generate "pi-models-${name}.json" icfg.piModels;
+      piModelsYml = yamlFormat.generate "omp-models-${name}.yml" icfg.piModels;
 
       # Host-side wrapper to interact with pi inside the container as the opencrow user.
       opencrowPi = pkgs.writeShellScriptBin "${containerName}-pi" ''
@@ -542,19 +541,21 @@ let
             };
             users.groups.opencrow = { };
 
-            # Place the generated settings.json into PI_CODING_AGENT_DIR
-            # so pi discovers declared extensions and packages.
+            # Install omp's config.yml (settings) and models.yml into
+            # PI_CODING_AGENT_DIR. Extensions are passed on the command line.
             systemd.tmpfiles.rules = [
               # Fix up ownership of the bind-mounted state dir. The host side
               # created it as root because the opencrow user does not exist
               # there; inside the container we know the UID and can chown it.
               "d ${stateDir} 0750 opencrow opencrow -"
               "d ${icfg.environment.PI_CODING_AGENT_DIR} 0750 opencrow opencrow -"
-              "L+ ${icfg.environment.PI_CODING_AGENT_DIR}/settings.json - - - - ${piSettingsJson}"
             ]
             ++ lib.optional (
+              icfg.piSettings != { }
+            ) "L+ ${icfg.environment.PI_CODING_AGENT_DIR}/config.yml - - - - ${piConfigYml}"
+            ++ lib.optional (
               icfg.piModels != { }
-            ) "L+ ${icfg.environment.PI_CODING_AGENT_DIR}/models.json - - - - ${piModelsJson}";
+            ) "L+ ${icfg.environment.PI_CODING_AGENT_DIR}/models.yml - - - - ${piModelsYml}";
 
             systemd.services.opencrow = {
               description = "OpenCrow Messaging Bot (${name})";
@@ -577,6 +578,11 @@ let
               // lib.filterAttrs (_: v: v != "") icfg.environment
               // lib.optionalAttrs (icfg.extensions.memory or false == true) {
                 SEDIMENT_DB = "${stateDir}/sediment";
+              }
+              // lib.optionalAttrs (resolvedExtensions != { }) {
+                OPENCROW_PI_EXTENSIONS = lib.concatStringsSep "," (
+                  map toString (lib.attrValues resolvedExtensions)
+                );
               };
 
               serviceConfig = {
@@ -624,7 +630,7 @@ in
               {
                 mybot = {
                   enable = true;
-                  piPackage = llm-agents.packages.''${system}.pi;
+                  piPackage = llm-agents.packages.''${system}.omp;
                   environment = {
                     OPENCROW_BACKEND = "nostr";
                     OPENCROW_NOSTR_RELAYS = "wss://relay.damus.io";

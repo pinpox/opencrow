@@ -1,9 +1,9 @@
 # Extensions
 
-Pi supports [extensions](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/extensions.md)
+omp supports [extensions](https://github.com/can1357/oh-my-pi)
 — TypeScript modules that hook into the agent lifecycle, register custom tools,
-and modify behavior. OpenCrow passes extension paths to pi via a generated
-`settings.json` in `PI_CODING_AGENT_DIR`.
+and modify behavior. OpenCrow passes extension paths to omp via its
+`--extension` flag (wired through the `OPENCROW_PI_EXTENSIONS` env var).
 
 ## NixOS module
 
@@ -22,7 +22,7 @@ Setting a value to `false` explicitly disables an extension (useful for
 overriding defaults from other modules). The attrset is mergeable across NixOS
 module files.
 
-Extra keys for pi's `settings.json` (e.g. `packages`, `compaction`) can be
+Extra keys for omp's `config.yml` (e.g. `compaction`) can be
 added via `piSettings`:
 
 ```nix
@@ -53,12 +53,12 @@ See [`extensions/memory/`](../extensions/memory/) for the source.
 
 ## Writing an extension
 
-See the [pi extensions documentation](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/extensions.md)
+See the [omp extensions documentation](https://github.com/can1357/oh-my-pi)
 for the full API. In short, create a TypeScript file that exports a default
 function receiving the `ExtensionAPI`:
 
 ```typescript
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async (event) => {

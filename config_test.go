@@ -268,3 +268,19 @@ func TestDiscoverSkills_Symlinks(t *testing.T) {
 		t.Errorf("skill path = %q, want %q", skills[0], want)
 	}
 }
+
+func TestPiConfig_Extensions(t *testing.T) {
+	t.Parallel()
+
+	env := baseMatrixEnv()
+	env["OPENCROW_PI_EXTENSIONS"] = "/ext/a, /ext/b"
+
+	cfg, err := loadConfig(testEnv(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"/ext/a", "/ext/b"}; !slices.Equal(cfg.Pi.Extensions, want) {
+		t.Errorf("extensions = %v, want %v", cfg.Pi.Extensions, want)
+	}
+}

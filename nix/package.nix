@@ -37,7 +37,7 @@ buildGoModule (finalAttrs: {
   '';
 
   meta = {
-    description = "Messaging bot (Matrix/Nostr/Signal) bridging messages to an AI coding agent via pi RPC";
+    description = "Messaging bot (Matrix/Nostr/Signal) bridging messages to the omp (Oh My Pi) coding agent via RPC";
     homepage = "https://github.com/pinpox/opencrow";
     mainProgram = "opencrow";
   };

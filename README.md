@@ -6,11 +6,12 @@ A saner alternative to [OpenClaw](https://github.com/openclaw/openclaw).
 </p>
 
 OpenCrow is a messaging bot that bridges chat messages to
-[pi](https://github.com/badlogic/pi-mono), a coding agent with built-in tools,
-session persistence, auto-compaction, and multi-provider LLM support. Instead of
-reimplementing all of that in Go, OpenCrow spawns pi as a long-lived subprocess
-via its RPC protocol and acts as a thin bridge. The bot operates with a single
-active conversation at a time; session data persists across restarts.
+[omp](https://github.com/can1357/oh-my-pi) (Oh My Pi), a coding agent with
+built-in tools, session persistence, auto-compaction, and multi-provider LLM
+support. Instead of reimplementing all of that in Go, OpenCrow spawns omp as a
+long-lived subprocess via its RPC protocol and acts as a thin bridge. The bot
+operates with a single active conversation at a time; session data persists
+across restarts.
 
 OpenCrow supports multiple messaging backends:
 - **Matrix** — E2EE chat rooms via mautrix
@@ -23,12 +24,12 @@ graph LR
     Heartbeat -->|timer| Inbox
     Reminders[(reminders)] -->|due| Inbox
     Trigger["trigger.pipe"] -->|external| Inbox
-    Inbox -->|dequeue| Worker -->|RPC| Pi["pi process"]
+    Inbox -->|dequeue| Worker -->|RPC| Pi["omp process"]
     Pi -->|response| Worker -->|reply| Transport
 ```
 
 The Go bot receives messages from the configured backend, forwards them to the
-pi process, collects the response, and sends it back.
+omp process, collects the response, and sends it back.
 
 > [!WARNING]
 > There is no whitelisting, permission system, or tool filtering. Trying to bolt

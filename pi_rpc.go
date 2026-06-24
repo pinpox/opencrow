@@ -50,7 +50,7 @@ type rpcEvent struct {
 	// auto_retry_end fields — camelCase is dictated by the pi protocol.
 	FinalError string `json:"finalError,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
 
-	// compaction_start fields
+	// auto_compaction_start fields
 	Reason string `json:"reason,omitempty"`
 
 	// extension_error fields
@@ -102,6 +102,7 @@ const (
 	rpcTypeAutoRetryEnd        = "auto_retry_end"
 	rpcTypeExtensionError      = "extension_error"
 	rpcTypeExtensionUIRequest  = "extension_ui_request"
+	rpcTypeAutoCompactionStart = "auto_compaction_start"
 )
 
 // Compact sends a compact command to reduce context token usage.
@@ -293,7 +294,7 @@ func (p *PiProcess) handleSideEffects(evt rpcEvent) error {
 // final — if retry is disabled or the error isn't in pi's retryable
 // set, no auto_retry_* events follow and pi just goes idle with
 // nothing further on the wire. We must therefore commit the error
-// immediately on agent_end and let auto_retry_start/compaction_start
+// immediately on agent_end and let auto_retry_start/auto_compaction_start
 // rescind it if they arrive next.
 type resultWaiter struct {
 	reply    string
@@ -306,7 +307,7 @@ type resultWaiter struct {
 // overflow-triggered auto-compaction. Both are followed by a fresh
 // agent_start/end cycle, so the error that preceded them wasn't final.
 func continuesTurn(t string) bool {
-	return t == rpcTypeAutoRetryStart || t == "compaction_start"
+	return t == rpcTypeAutoRetryStart || t == rpcTypeAutoCompactionStart
 }
 
 func (w *resultWaiter) handle(evt rpcEvent) (bool, error) {
@@ -338,7 +339,7 @@ func (w *resultWaiter) handle(evt rpcEvent) (bool, error) {
 }
 
 // graceDrain peeks at the events channel for up to errGraceWindow,
-// looking for an auto_retry_start or compaction_start that would
+// looking for an auto_retry_start or auto_compaction_start that would
 // rescind a just-committed error. Returns true if one arrived (caller
 // should keep draining), false if the window elapsed or the channel
 // closed. Reads bypass drainEvents so we don't re-run side effects.
@@ -379,7 +380,7 @@ func (w *resultWaiter) handleAgentEnd(evt rpcEvent) {
 		// Commit immediately — if pi deems the error non-retryable
 		// it goes idle with nothing further on the wire, so waiting
 		// for a follow-up would hang. graceDrain gives a subsequent
-		// auto_retry_start or compaction_start a short window
+		// auto_retry_start or auto_compaction_start a short window
 		// to rescind this.
 		w.finalErr = last.errorMessage
 		slog.Warn("agent_end: provider error", "error", last.errorMessage)
@@ -393,7 +394,7 @@ func (w *resultWaiter) handleAgentEnd(evt rpcEvent) {
 }
 
 // errGraceWindow is how long we wait after an error agent_end for a
-// rescinding auto_retry_start or compaction_start before treating
+// rescinding auto_retry_start or auto_compaction_start before treating
 // the error as final. Pi emits the follow-up within milliseconds
 // (same event-queue tick), so 200ms is generous without adding
 // perceptible latency to the rare "pi gave up and went idle" path.

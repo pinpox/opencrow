@@ -28,16 +28,17 @@ Send these as plain text messages in any conversation with the bot:
 | Variable | Default | Description |
 |---|---|---|
 | `OPENCROW_BACKEND` | `matrix` | Messaging backend (`matrix`, `nostr`, or `signal`) |
-| `OPENCROW_PI_BINARY` | `pi` | Path to the pi binary |
+| `OPENCROW_PI_BINARY` | `omp` | Path to the omp binary |
 | `OPENCROW_PI_SESSION_DIR` | `/var/lib/opencrow/sessions` | Session data directory |
 | `OPENCROW_PI_PROVIDER` | `anthropic` | LLM provider |
 | `OPENCROW_PI_MODEL` | `claude-opus-4-6` | Model name |
-| `OPENCROW_PI_WORKING_DIR` | `/var/lib/opencrow` | Working directory for pi |
-| `OPENCROW_PI_IDLE_TIMEOUT` | `30m` | Kill pi after this duration of inactivity |
+| `OPENCROW_PI_WORKING_DIR` | `/var/lib/opencrow` | Working directory for omp |
+| `OPENCROW_PI_IDLE_TIMEOUT` | `30m` | Kill omp after this duration of inactivity |
 | `OPENCROW_PI_SYSTEM_PROMPT` | built-in | Custom system prompt |
 | `OPENCROW_SOUL_FILE` | _(empty)_ | Path to a file containing the system prompt (overrides `OPENCROW_PI_SYSTEM_PROMPT`) |
 | `OPENCROW_PI_SKILLS` | _(empty)_ | Comma-separated skill directory paths |
 | `OPENCROW_PI_SKILLS_DIR` | _(empty)_ | Directory containing skill subdirectories |
+| `OPENCROW_PI_EXTENSIONS` | _(empty)_ | Comma-separated omp extension paths (dirs or files), passed via `--extension` |
 | `OPENCROW_SHOW_TOOL_CALLS` | `false` | Show tool invocations (bash, read, edit, …) as messages in the chat |
 | `OPENCROW_DEBUG_TIMING` | `false` | Append task duration to each reply (useful for profiling local models) |
 
@@ -45,10 +46,10 @@ Send these as plain text messages in any conversation with the bot:
 
 **Receiving files** — Users can send images, audio, video, and documents to the
 bot. Attachments are downloaded to the session directory under `attachments/`
-and the file path is passed to pi so it can read or process the file with its
+and the file path is passed to omp so it can read or process the file with its
 tools. On Nostr, media URLs in DMs are automatically detected and downloaded.
 
-**Sending files back** — Pi can send files to the user by including
+**Sending files back** — omp can send files to the user by including
 `<sendfile>/absolute/path</sendfile>` tags in its response. The bot strips the
 tags, uploads/sends each referenced file (to Matrix via MXC, to a Blossom
 server for Nostr, or directly via signal-cli for Signal), and delivers them as
@@ -139,25 +140,28 @@ services.opencrow = {
 
 ### LLM provider credentials
 
-Pi needs credentials for your LLM provider. There are two ways to set this up:
+omp needs credentials for your LLM provider. There are two ways to set this up:
 
 **Option A: API key** — set `ANTHROPIC_API_KEY` (or the equivalent for your
 provider) in an environment file and pass it via the `environmentFiles` option.
 API keys don't expire and are the simplest approach.
 
-**Option B: OAuth (Claude Pro/Max)** — pi supports OAuth against your Anthropic
+**Option B: OAuth (Claude Pro/Max)** — omp supports OAuth against your Anthropic
 account, so you can use your subscription instead of API credits. The NixOS
-module installs an `opencrow-pi` wrapper on the host that runs pi inside the
-container with the correct environment. To authenticate:
+module installs an `opencrow-pi` wrapper on the host that runs omp inside the
+container with the correct environment. To authenticate, launch an interactive
+session and run the `/login` slash command:
 
 ```bash
-sudo opencrow-pi auth login
+sudo opencrow-pi
+# then, inside the omp session:
+/login anthropic
 ```
 
-Pi will print a URL — open it in any browser, complete the Anthropic login, and
-paste the redirect URL back into the terminal. No local browser is required on
-the server itself. The refresh token persists across restarts — you only need to
-do this once (unless the token gets revoked).
+omp prints a URL — open it in any browser, complete the Anthropic login, and
+paste the redirect URL back with `/login <redirect-url>`. No local browser is
+required on the server itself. Credentials persist in `agent.db` across restarts
+— you only need to do this once (unless they get revoked).
 
 ### Environment files
 

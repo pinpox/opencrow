@@ -82,10 +82,13 @@ type PiConfig struct {
 	Model      string
 	// WorkingDir is the agent's cwd — where it reads/writes user-facing files
 	// like HEARTBEAT.md. In system prompts, refer to this as "working directory".
-	WorkingDir    string
-	IdleTimeout   time.Duration
-	SystemPrompt  string
-	Skills        []string
+	WorkingDir   string
+	IdleTimeout  time.Duration
+	SystemPrompt string
+	Skills       []string
+	// Extensions are omp extension paths (dirs or files) loaded via
+	// --extension — OPENCROW_PI_EXTENSIONS, comma-separated.
+	Extensions    []string
 	ShowToolCalls bool // OPENCROW_SHOW_TOOL_CALLS — relay tool_execution_start events to chat
 	DebugTiming   bool // OPENCROW_DEBUG_TIMING — append timing info to each reply
 }
@@ -139,7 +142,7 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 			Name:       env.or("OPENCROW_SOCKET_NAME", "OpenCrow"),
 		},
 		Pi: PiConfig{
-			BinaryPath:    env.or("OPENCROW_PI_BINARY", "pi"),
+			BinaryPath:    env.or("OPENCROW_PI_BINARY", "omp"),
 			SessionDir:    env.or("OPENCROW_PI_SESSION_DIR", "/var/lib/opencrow/sessions"),
 			Provider:      env.or("OPENCROW_PI_PROVIDER", "anthropic"),
 			Model:         env.or("OPENCROW_PI_MODEL", "claude-opus-4-6"),
@@ -147,6 +150,7 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 			IdleTimeout:   idleTimeout,
 			SystemPrompt:  loadSoul(env),
 			Skills:        skills,
+			Extensions:    env.list("OPENCROW_PI_EXTENSIONS"),
 			ShowToolCalls: env.bool("OPENCROW_SHOW_TOOL_CALLS"),
 			DebugTiming:   env.bool("OPENCROW_DEBUG_TIMING"),
 		},

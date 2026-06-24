@@ -1,12 +1,12 @@
 # Skills
 
-Pi supports skills — markdown files that extend the agent's capabilities by
+omp supports skills — markdown files that extend the agent's capabilities by
 providing instructions and examples for specific tasks. Each skill is a directory
 containing a `SKILL.md` file with a YAML frontmatter (`name`, `description`) and
 the skill's instructions.
 
 OpenCrow ships with a `web` skill (for browsing with curl/lynx) and passes it to
-pi by default.
+omp by default.
 
 ## NixOS module
 
@@ -22,7 +22,7 @@ services.opencrow.skills = {
 ```
 
 All entries are assembled into a single directory via `linkFarm` and passed to
-pi through `OPENCROW_PI_SKILLS_DIR`. The attrset is mergeable, so skills can be
+omp through `OPENCROW_PI_SKILLS_DIR`. The attrset is mergeable, so skills can be
 added from multiple NixOS module files.
 
 ## Environment variables
