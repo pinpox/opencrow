@@ -26,7 +26,7 @@ agent replies `HEARTBEAT_OK` the response is suppressed; anything else is
 delivered to the conversation.
 
 Heartbeat prompts do not reset the idle timer — if no real user messages
-arrive, the pi process is still reaped after the idle timeout.
+arrive, the omp process is still reaped after the idle timeout.
 
 ### Enabling on NixOS
 
@@ -40,7 +40,7 @@ HEARTBEAT.md checklist loop.
 ## Reminders
 
 One-shot reminders live in the `reminders` table in the session's
-`opencrow.db`. Enable the bundled `reminders` pi extension to give the
+`opencrow.db`. Enable the bundled `reminders` omp extension to give the
 agent structured tools:
 
 - `remind_at(when, prompt)` — schedule a reminder (ISO 8601, normalized to UTC)
@@ -51,7 +51,7 @@ Every minute the scheduler runs `DELETE … WHERE fire_at <= now() RETURNING …
 and enqueues each due reminder as a trigger item. Cleanup is atomic — the
 agent never manages lifecycle.
 
-`OPENCROW_SESSION_DIR` is exported into pi's environment automatically.
+`OPENCROW_SESSION_DIR` is exported into omp's environment automatically.
 
 ### Enabling on NixOS
 
@@ -78,7 +78,7 @@ immediately without waiting for a tick.
 
 > [!CAUTION]
 > The trigger pipe is an **unauthenticated** input channel. Any process
-> that can write to the FIFO can inject arbitrary prompts into `pi`, which
+> that can write to the FIFO can inject arbitrary prompts into `omp`, which
 > has full tool access. The FIFO is created with mode `0664`, so any
 > process in the `opencrow` group can write to it. Make sure only trusted
 > services are members of that group.

@@ -34,9 +34,9 @@ func logSimpleRPCEvent(evt rpcEvent) {
 		slog.Info("pi: agent started")
 	case rpcTypeAgentEnd:
 		slog.Info("pi: agent finished")
-	case "compaction_start":
+	case rpcTypeAutoCompactionStart:
 		slog.Info("pi: compaction started", "reason", evt.Reason)
-	case "compaction_end":
+	case "auto_compaction_end":
 		slog.Info("pi: compaction finished")
 	case "turn_start", "turn_end", "message_start", "message_end", rpcTypeExtensionUIRequest:
 		slog.Debug("pi: " + evt.Type)
@@ -46,7 +46,8 @@ func logSimpleRPCEvent(evt rpcEvent) {
 }
 
 func logAutoRetryStart(evt rpcEvent) {
-	slog.Warn("pi: auto-retry",
+	slog.Warn(
+		"pi: auto-retry",
 		"attempt", evt.Attempt,
 		"max", evt.MaxAttempts,
 		"delay_ms", evt.DelayMs,
@@ -63,7 +64,8 @@ func logAutoRetryEnd(evt rpcEvent) {
 }
 
 func logExtensionError(evt rpcEvent) {
-	slog.Error("pi: extension error",
+	slog.Error(
+		"pi: extension error",
 		"extension", evt.ExtensionPath,
 		"event", evt.Event,
 		"error", evt.Error,

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -66,7 +67,12 @@ func StartPi(cfg PiConfig, roomID string, fresh bool) (*PiProcess, error) {
 		return nil, fmt.Errorf("creating trigger FIFO: %w", err)
 	}
 
-	args := buildPiArgs(cfg, fresh)
+	skillsConfigPath, err := writeSkillsConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	args := buildPiArgs(cfg, fresh, skillsConfigPath)
 
 	// context.Background: see the doc comment on StartPi.
 	cmd := exec.CommandContext(context.Background(), cfg.BinaryPath, args...) //nolint:gosec // binary path is from trusted config
@@ -187,7 +193,7 @@ func startPiProcess(cmd *exec.Cmd, sessionDir string) (*PiProcess, error) {
 	}, nil
 }
 
-func buildPiArgs(cfg PiConfig, fresh bool) []string {
+func buildPiArgs(cfg PiConfig, fresh bool, skillsConfigPath string) []string {
 	args := append([]string(nil), cfg.BinaryArgs...)
 
 	args = append(args, "--mode", "rpc", "--session-dir", cfg.SessionDir)
@@ -207,9 +213,56 @@ func buildPiArgs(cfg PiConfig, fresh bool) []string {
 		args = append(args, "--append-system-prompt", cfg.SystemPrompt)
 	}
 
-	for _, skill := range cfg.Skills {
-		args = append(args, "--skill", skill)
+	// omp has no per-skill flag (pi's --skill); skills are registered via
+	// a generated config overlay (skills.customDirectories). See writeSkillsConfig.
+	if skillsConfigPath != "" {
+		args = append(args, "--config", skillsConfigPath)
+	}
+
+	for _, ext := range cfg.Extensions {
+		args = append(args, "--extension", ext)
 	}
 
 	return args
+}
+
+// writeSkillsConfig writes an omp --config overlay that registers the
+// configured skills. omp dropped pi's per-skill --skill flag in favour of
+// scanning skills.customDirectories for */SKILL.md, so each skill directory
+// is mapped to its parent directory. The overlay is written as JSON, which
+// omp parses as a config.yml-style YAML mapping. Returns "" when no skills
+// are configured.
+func writeSkillsConfig(cfg PiConfig) (string, error) {
+	if len(cfg.Skills) == 0 {
+		return "", nil
+	}
+
+	seen := make(map[string]struct{}, len(cfg.Skills))
+	dirs := make([]string, 0, len(cfg.Skills))
+
+	for _, skill := range cfg.Skills {
+		parent := filepath.Dir(skill)
+		if _, ok := seen[parent]; ok {
+			continue
+		}
+
+		seen[parent] = struct{}{}
+		dirs = append(dirs, parent)
+	}
+
+	overlay := map[string]any{
+		"skills": map[string]any{"customDirectories": dirs},
+	}
+
+	data, err := json.Marshal(overlay)
+	if err != nil {
+		return "", fmt.Errorf("marshaling skills config: %w", err)
+	}
+
+	path := filepath.Join(cfg.SessionDir, "omp-skills.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", fmt.Errorf("writing skills config: %w", err)
+	}
+
+	return path, nil
 }

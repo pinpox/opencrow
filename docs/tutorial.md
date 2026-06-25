@@ -14,7 +14,7 @@ isolation.
     opencrow.url = "github:pinpox/opencrow";
     opencrow.inputs.nixpkgs.follows = "nixpkgs";
 
-    # pi coding agent
+    # omp (Oh My Pi) coding agent
     llm-agents.url = "github:numtide/llm-agents.nix";
     llm-agents.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -50,7 +50,7 @@ Or extract it from an existing Matrix client's session.
 
   services.opencrow = {
     enable = true;
-    piPackage = self.inputs.llm-agents.packages.${pkgs.stdenv.hostPlatform.system}.pi;
+    piPackage = self.inputs.llm-agents.packages.${pkgs.stdenv.hostPlatform.system}.omp;
 
     environment = {
       OPENCROW_MATRIX_HOMESERVER = "https://matrix.org";
@@ -96,11 +96,13 @@ subscription, skip `ANTHROPIC_API_KEY` and authenticate interactively after
 deployment:
 
 ```bash
-sudo opencrow-pi auth login
+sudo opencrow-pi
+# then, inside the omp session:
+/login anthropic
 ```
 
-Pi prints a URL — open it in any browser, log in, and paste the redirect URL
-back into the terminal.
+omp prints a URL — open it in any browser, log in, and paste the redirect URL
+back with `/login <redirect-url>`.
 
 ## 5. Deploy and verify
 
@@ -113,7 +115,7 @@ machinectl list
 # Follow the bot logs
 journalctl -M opencrow -u opencrow -f
 
-# Interactive pi shell inside the container (requires root)
+# Interactive omp shell inside the container (requires root)
 sudo opencrow-pi
 ```
 
