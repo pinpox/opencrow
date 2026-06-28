@@ -28,6 +28,28 @@ func TestMatrixConfig_ValidateReportsAllMissing(t *testing.T) {
 	}
 }
 
+func TestMatrixConfig_PasswordSatisfiesTokenRequirement(t *testing.T) {
+	t.Parallel()
+
+	// Password instead of an access token is valid.
+	if err := (MatrixConfig{
+		Homeserver: "https://matrix.example.com",
+		UserID:     "@bot:example.com",
+		Password:   "hunter2",
+	}).validate(); err != nil {
+		t.Errorf("password-only config should validate, got: %v", err)
+	}
+
+	// Access token alone remains valid (backwards compatible).
+	if err := (MatrixConfig{
+		Homeserver:  "https://matrix.example.com",
+		UserID:      "@bot:example.com",
+		AccessToken: "syt_test_token",
+	}).validate(); err != nil {
+		t.Errorf("token-only config should validate, got: %v", err)
+	}
+}
+
 // testEnv returns a getenv function backed by a map.
 func testEnv(m map[string]string) func(string) string {
 	return func(key string) string {

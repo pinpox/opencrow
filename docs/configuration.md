@@ -61,11 +61,15 @@ attachments. Multiple `<sendfile>` tags can appear in a single response.
 |---|---|---|
 | `OPENCROW_MATRIX_HOMESERVER` | Yes | Matrix homeserver URL |
 | `OPENCROW_MATRIX_USER_ID` | Yes | Bot's Matrix user ID |
-| `OPENCROW_MATRIX_ACCESS_TOKEN` | Yes | Access token (via environment file) |
+| `OPENCROW_MATRIX_ACCESS_TOKEN` | Yes* | Access token (via environment file) |
+| `OPENCROW_MATRIX_PASSWORD_FILE` | Yes* | Path to a file with the account password; OpenCrow logs in to obtain a token |
+| `OPENCROW_MATRIX_PASSWORD` | Yes* | Account password (prefer the `_FILE` form) |
 | `OPENCROW_MATRIX_DEVICE_ID` | No | Device ID (auto-resolved if omitted) |
 | `OPENCROW_MATRIX_PICKLE_KEY` | No | Pickle key for crypto DB |
 | `OPENCROW_MATRIX_CRYPTO_DB` | No | Path to crypto SQLite DB |
 | `OPENCROW_ALLOWED_USERS` | No | Comma-separated Matrix user IDs allowed to interact |
+
+*One of `OPENCROW_MATRIX_ACCESS_TOKEN`, `OPENCROW_MATRIX_PASSWORD_FILE`, or `OPENCROW_MATRIX_PASSWORD` is required. With a password, OpenCrow logs in on first start and persists the resulting token + device to `matrix-session.json` (next to the crypto DB), reusing it across restarts.
 
 ## Nostr configuration
 

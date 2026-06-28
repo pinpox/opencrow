@@ -270,6 +270,7 @@ func createMatrixBackend(cfg *Config, handler backend.MessageHandler, onRoomClea
 		Homeserver:     cfg.Matrix.Homeserver,
 		UserID:         cfg.Matrix.UserID,
 		AccessToken:    cfg.Matrix.AccessToken,
+		Password:       cfg.Matrix.Password,
 		DeviceID:       cfg.Matrix.DeviceID,
 		AllowedUsers:   cfg.Matrix.AllowedUsers,
 		PickleKey:      cfg.Matrix.PickleKey,
