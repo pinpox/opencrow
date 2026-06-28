@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,7 @@ type Config struct {
 	Homeserver     string
 	UserID         string
 	AccessToken    string
+	Password       string
 	DeviceID       string
 	AllowedUsers   map[string]struct{}
 	PickleKey      string
@@ -76,6 +78,15 @@ func New(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 		w.Out = os.Stderr
 	})).With().Timestamp().Logger().Level(zerolog.InfoLevel)
 
+	// Backward compatible: with a token, behave exactly as before. Only when no
+	// token is supplied do we log in with the password to obtain one (persisted
+	// and reused across restarts so the device — and thus E2EE — stays stable).
+	if cfg.AccessToken == "" {
+		if err := ensurePasswordLogin(client, cfg); err != nil {
+			return nil, fmt.Errorf("matrix password login: %w", err)
+		}
+	}
+
 	return &Backend{
 		client:       client,
 		handler:      handler,
@@ -83,6 +94,79 @@ func New(cfg Config, handler backend.MessageHandler) (*Backend, error) {
 		userID:       id.UserID(cfg.UserID),
 		allowedUsers: cfg.AllowedUsers,
 	}, nil
+}
+
+type storedSession struct {
+	AccessToken string `json:"access_token"`
+	DeviceID    string `json:"device_id"`
+}
+
+func sessionPath(cfg Config) string {
+	return filepath.Join(filepath.Dir(cfg.CryptoDBPath), "matrix-session.json")
+}
+
+// ensurePasswordLogin obtains an access token via password login when none was
+// configured, reusing a previously persisted token (and device) when still
+// valid so restarts do not spawn new devices or break E2EE.
+func ensurePasswordLogin(client *mautrix.Client, cfg Config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	path := sessionPath(cfg)
+
+	if data, err := os.ReadFile(path); err == nil {
+		var s storedSession
+		if json.Unmarshal(data, &s) == nil && s.AccessToken != "" {
+			client.AccessToken = s.AccessToken
+			if s.DeviceID != "" {
+				client.DeviceID = id.DeviceID(s.DeviceID)
+			}
+			if _, err := client.Whoami(ctx); err == nil {
+				slog.Info("matrix: reusing stored access token", "device_id", client.DeviceID)
+				return nil
+			}
+			slog.Warn("matrix: stored access token invalid, logging in again")
+			client.AccessToken = ""
+		}
+	}
+
+	deviceID := cfg.DeviceID
+	if deviceID == "" {
+		deviceID = "opencrow"
+	}
+
+	resp, err := client.Login(ctx, &mautrix.ReqLogin{
+		Type: mautrix.AuthTypePassword,
+		Identifier: mautrix.UserIdentifier{
+			Type: mautrix.IdentifierTypeUser,
+			User: cfg.UserID,
+		},
+		Password:                 cfg.Password,
+		DeviceID:                 id.DeviceID(deviceID),
+		InitialDeviceDisplayName: "opencrow",
+		StoreCredentials:         true,
+	})
+	if err != nil {
+		return err
+	}
+
+	slog.Info("matrix: logged in with password", "device_id", resp.DeviceID)
+
+	data, err := json.Marshal(storedSession{
+		AccessToken: resp.AccessToken,
+		DeviceID:    string(resp.DeviceID),
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("persisting matrix session: %w", err)
+	}
+
+	return nil
 }
 
 // SetRoomCleanupCallback sets the callback invoked when a room is cleaned up.

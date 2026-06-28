@@ -43,6 +43,7 @@ type MatrixConfig struct {
 	Homeserver   string
 	UserID       string
 	AccessToken  string
+	Password     string
 	DeviceID     string
 	AllowedUsers map[string]struct{}
 	PickleKey    string
@@ -125,12 +126,18 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 
+	matrixPassword, err := loadMatrixPassword(env)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		BackendType: backendType,
 		Matrix: MatrixConfig{
 			Homeserver:   env.str("OPENCROW_MATRIX_HOMESERVER"),
 			UserID:       env.str("OPENCROW_MATRIX_USER_ID"),
 			AccessToken:  env.str("OPENCROW_MATRIX_ACCESS_TOKEN"),
+			Password:     matrixPassword,
 			DeviceID:     env.str("OPENCROW_MATRIX_DEVICE_ID"),
 			AllowedUsers: allowedUsers,
 			PickleKey:    env.or("OPENCROW_MATRIX_PICKLE_KEY", "opencrow-default-pickle-key"),
@@ -167,6 +174,17 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 	return cfg, nil
 }
 
+func loadMatrixPassword(env envReader) (string, error) {
+	if path := env.str("OPENCROW_MATRIX_PASSWORD_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("reading OPENCROW_MATRIX_PASSWORD_FILE: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return env.str("OPENCROW_MATRIX_PASSWORD"), nil
+}
+
 func (cfg *Config) validateBackend(env envReader) error {
 	switch cfg.BackendType {
 	case backendMatrix:
@@ -188,11 +206,14 @@ func (cfg *Config) validateBackend(env envReader) error {
 }
 
 func (m MatrixConfig) validate() error {
-	return errors.Join(
+	err := errors.Join(
 		requireField(m.Homeserver, "OPENCROW_MATRIX_HOMESERVER"),
 		requireField(m.UserID, "OPENCROW_MATRIX_USER_ID"),
-		requireField(m.AccessToken, "OPENCROW_MATRIX_ACCESS_TOKEN"),
 	)
+	if m.AccessToken == "" && m.Password == "" {
+		err = errors.Join(err, errors.New("OPENCROW_MATRIX_ACCESS_TOKEN or OPENCROW_MATRIX_PASSWORD is required"))
+	}
+	return err
 }
 
 func loadSignalConfig(env envReader, workingDir string, allowedUsers map[string]struct{}) SignalConfig {

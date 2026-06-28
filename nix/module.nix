@@ -143,7 +143,7 @@ let
           List of environment files containing secrets (on the host).
           Bind-mounted read-only into the container.
           Must define at minimum (across all files):
-          - For Matrix: OPENCROW_MATRIX_ACCESS_TOKEN
+          - For Matrix: OPENCROW_MATRIX_ACCESS_TOKEN, or OPENCROW_MATRIX_PASSWORD_FILE / OPENCROW_MATRIX_PASSWORD
           - For Nostr: OPENCROW_NOSTR_PRIVATE_KEY or OPENCROW_NOSTR_PRIVATE_KEY_FILE
           - ANTHROPIC_API_KEY (or the appropriate key for your provider)
         '';

@@ -38,6 +38,10 @@ curl -s -X POST https://matrix.org/_matrix/client/v3/login \
 
 Or extract it from an existing Matrix client's session.
 
+Alternatively, skip the manual token entirely: set `OPENCROW_MATRIX_PASSWORD_FILE`
+(or `OPENCROW_MATRIX_PASSWORD`) and OpenCrow logs in on first start, then persists
+and reuses the token across restarts.
+
 ## 3. Import the module and configure the bot
 
 ```nix
