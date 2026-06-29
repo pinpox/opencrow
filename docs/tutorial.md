@@ -26,7 +26,7 @@ isolation.
 Register a new Matrix account on your homeserver for the bot. You'll need:
 - The homeserver URL (e.g. `https://matrix.org`)
 - The bot's full user ID (e.g. `@mybot:matrix.org`)
-- An access token
+- An access token — *optional*; alternatively let OpenCrow log in with a password (see below)
 
 To get an access token, log in with the bot account using `curl`:
 

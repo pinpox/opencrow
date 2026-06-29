@@ -65,6 +65,10 @@ type Backend struct {
 
 // New creates a new Matrix backend.
 func New(cfg Config, handler backend.MessageHandler) (*Backend, error) {
+	if lp, hs, err := id.UserID(cfg.UserID).Parse(); err != nil || lp == "" || hs == "" {
+		return nil, fmt.Errorf("OPENCROW_MATRIX_USER_ID must be a full Matrix ID like @bot:example.org, got %q", cfg.UserID)
+	}
+
 	client, err := mautrix.NewClient(cfg.Homeserver, id.UserID(cfg.UserID), cfg.AccessToken)
 	if err != nil {
 		return nil, fmt.Errorf("creating matrix client: %w", err)
@@ -121,11 +125,15 @@ func ensurePasswordLogin(client *mautrix.Client, cfg Config) error {
 			if s.DeviceID != "" {
 				client.DeviceID = id.DeviceID(s.DeviceID)
 			}
-			if _, err := client.Whoami(ctx); err == nil {
+			if resp, err := client.Whoami(ctx); err != nil {
+				slog.Warn("matrix: stored access token invalid, logging in again")
+			} else if resp.UserID == id.UserID(cfg.UserID) {
 				slog.Info("matrix: reusing stored access token", "device_id", client.DeviceID)
 				return nil
+			} else {
+				slog.Warn("matrix: stored token belongs to a different user, logging in again",
+					"stored_user", resp.UserID, "expected_user", cfg.UserID)
 			}
-			slog.Warn("matrix: stored access token invalid, logging in again")
 			client.AccessToken = ""
 		}
 	}
