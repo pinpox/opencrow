@@ -126,18 +126,12 @@ func loadConfig(getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 
-	matrixPassword, err := loadMatrixPassword(env)
-	if err != nil {
-		return nil, err
-	}
-
 	cfg := &Config{
 		BackendType: backendType,
 		Matrix: MatrixConfig{
 			Homeserver:   env.str("OPENCROW_MATRIX_HOMESERVER"),
 			UserID:       env.str("OPENCROW_MATRIX_USER_ID"),
 			AccessToken:  env.str("OPENCROW_MATRIX_ACCESS_TOKEN"),
-			Password:     matrixPassword,
 			DeviceID:     env.str("OPENCROW_MATRIX_DEVICE_ID"),
 			AllowedUsers: allowedUsers,
 			PickleKey:    env.or("OPENCROW_MATRIX_PICKLE_KEY", "opencrow-default-pickle-key"),
@@ -180,7 +174,7 @@ func loadMatrixPassword(env envReader) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading OPENCROW_MATRIX_PASSWORD_FILE: %w", err)
 		}
-		return strings.TrimSpace(string(data)), nil
+		return strings.TrimRight(string(data), "\r\n"), nil
 	}
 	return env.str("OPENCROW_MATRIX_PASSWORD"), nil
 }
@@ -188,6 +182,11 @@ func loadMatrixPassword(env envReader) (string, error) {
 func (cfg *Config) validateBackend(env envReader) error {
 	switch cfg.BackendType {
 	case backendMatrix:
+		password, err := loadMatrixPassword(env)
+		if err != nil {
+			return err
+		}
+		cfg.Matrix.Password = password
 		return cfg.Matrix.validate()
 	case backendNostr:
 		nostrCfg, err := loadNostrConfig(env)
