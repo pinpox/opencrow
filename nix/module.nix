@@ -592,7 +592,9 @@ let
                 ImportCredential = lib.attrNames icfg.credentialFiles;
                 ExecStart = lib.getExe opencrowPkg;
                 Restart = "on-failure";
-                RestartSec = 10;
+                # Retry slowly: a bot started before its Matrix account is
+                # reconciled must not hammer Synapse's rc_login rate limiter.
+                RestartSec = 60;
                 User = "opencrow";
                 Group = "opencrow";
                 WorkingDirectory = stateDir;
