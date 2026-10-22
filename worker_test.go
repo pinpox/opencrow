@@ -20,7 +20,8 @@ func (stubBackend) SendMessage(context.Context, string, string, string) string {
 func (stubBackend) MarkdownFlavor() backend.MarkdownFlavor                     { return backend.MarkdownNone }
 
 // newFakePiWorker builds a Worker wired to the bash fake-pi stub.
-// Cleanup stops the spawned process.
+// Cleanup stops the spawned process. The inbox lives in a file DB: an
+// in-memory SQLite DB is per-connection, so Run's queries would not see it.
 func newFakePiWorker(t *testing.T) *Worker {
 	t.Helper()
 
@@ -31,7 +32,9 @@ func newFakePiWorker(t *testing.T) *Worker {
 		t.Fatal(err)
 	}
 
-	w := NewWorker(newTestInbox(t.Context(), t), PiConfig{
+	db := newTestDBAt(t.Context(), t, filepath.Join(dir, "opencrow.db"))
+
+	w := NewWorker(newTestInboxWithDB(t.Context(), t, db), PiConfig{
 		BinaryPath: "bash",
 		BinaryArgs: []string{script},
 		SessionDir: dir,

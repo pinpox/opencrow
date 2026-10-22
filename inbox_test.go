@@ -157,11 +157,12 @@ func TestInbox_ClearsStaleItemsOnInit(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(ctx, t)
 
-	// Heartbeat and compact items have in-memory state that doesn't
-	// survive a restart; both must be purged on init.
+	// Heartbeat, compact and login items have in-memory state that doesn't
+	// survive a restart; all must be purged on init.
 	seedInbox(t, db, []string{
 		"INSERT INTO inbox (priority, source, content) VALUES (2, 'heartbeat', '')",
 		"INSERT INTO inbox (priority, source, content) VALUES (0, 'compact', '')",
+		"INSERT INTO inbox (priority, source, content) VALUES (0, 'login', '')",
 		// These should survive.
 		"INSERT INTO inbox (priority, source, content) VALUES (0, 'user', 'keep me')",
 		"INSERT INTO inbox (priority, source, content) VALUES (1, 'trigger', 'event data')",
@@ -176,7 +177,7 @@ func TestInbox_ClearsStaleItemsOnInit(t *testing.T) {
 	must(t, err)
 
 	if count != 2 {
-		t.Fatalf("count = %d, want 2 (heartbeat and compact should be cleared)", count)
+		t.Fatalf("count = %d, want 2 (heartbeat, compact and login should be cleared)", count)
 	}
 
 	item1, err := inbox.Dequeue(ctx)
