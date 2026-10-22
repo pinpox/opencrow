@@ -34,8 +34,15 @@ type rpcEvent struct {
 	// agent_end fields
 	Messages json.RawMessage `json:"messages,omitempty"`
 
-	// extension_ui_request fields
-	Method string `json:"method,omitempty"`
+	// extension_ui_request fields — camelCase is dictated by the pi protocol.
+	Method       string `json:"method,omitempty"`
+	Title        string `json:"title,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
+	TargetID     string `json:"targetId,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase
+	// Message is a string on notify requests but an object on message_*
+	// events, so it stays raw and is decoded only where a string is expected.
+	Message json.RawMessage `json:"message,omitempty"`
 
 	// tool_execution_start fields — camelCase is dictated by the pi protocol.
 	ToolName string         `json:"toolName,omitempty"` //nolint:tagliatelle // pi protocol uses camelCase

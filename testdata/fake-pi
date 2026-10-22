@@ -22,5 +22,20 @@ while IFS= read -r line; do
     *'"type":"compact"'*|*'"type": "compact"'*)
       printf '%s\n' '{"type":"response","command":"compact","success":true,"data":{"tokensBefore":1,"summary":"s"}}'
       ;;
+    *'"type":"login"'*)
+      # Paste-code style OAuth: announce the URL, ask for the code, and
+      # accept only "good-code".
+      printf '%s\n' '{"type":"extension_ui_request","id":"u1","method":"open_url","url":"https://auth.example/authorize","instructions":"Sign in, then paste the code."}'
+      printf '%s\n' '{"type":"extension_ui_request","id":"u2","method":"input","title":"Paste the authorization code:"}'
+      IFS= read -r answer
+      case "$answer" in
+        *'"id":"u2"'*'"value":"good-code"'*)
+          printf '%s\n' '{"type":"response","command":"login","success":true,"data":{"providerId":"anthropic"}}'
+          ;;
+        *)
+          printf '%s\n' '{"type":"response","command":"login","success":false,"error":"invalid code"}'
+          ;;
+      esac
+      ;;
   esac
 done
