@@ -96,17 +96,9 @@ services.opencrow.environmentFiles = [
 ```
 
 **Or use OAuth instead of an API key** — if you have a Claude Pro/Max
-subscription, skip `ANTHROPIC_API_KEY` and authenticate interactively after
-deployment:
-
-```bash
-sudo opencrow-pi
-# then, inside the omp session:
-/login anthropic
-```
-
-omp prints a URL — open it in any browser, log in, and paste the redirect URL
-back with `/login <redirect-url>`.
+subscription, skip `ANTHROPIC_API_KEY` and send `!login` to the bot after
+deployment. It replies with a sign-in link; after signing in, paste the URL of
+the `localhost` page the browser ends on back into the chat.
 
 ## 5. Deploy and verify
 

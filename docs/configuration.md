@@ -21,6 +21,7 @@ Send these as plain text messages in any conversation with the bot:
 | `!stop` | Abort the currently running agent turn |
 | `!compact` | Compact conversation context to reduce token usage |
 | `!skills` | List the skills loaded for this bot instance |
+| `!login [provider]` | Sign in to the model provider via OAuth from the chat (defaults to `OPENCROW_PI_PROVIDER`) |
 | `!verify` | (Matrix only) Set up cross-signing so the bot's device shows as verified |
 
 ## General configuration
@@ -151,10 +152,17 @@ provider) in an environment file and pass it via the `environmentFiles` option.
 API keys don't expire and are the simplest approach.
 
 **Option B: OAuth (Claude Pro/Max)** — omp supports OAuth against your Anthropic
-account, so you can use your subscription instead of API credits. The NixOS
-module installs an `opencrow-pi` wrapper on the host that runs omp inside the
-container with the correct environment. To authenticate, launch an interactive
-session and run the `/login` slash command:
+account, so you can use your subscription instead of API credits. Send `!login`
+to the bot (or `!login <provider>` for a provider other than
+`OPENCROW_PI_PROVIDER`). The bot replies with a sign-in link and asks for the
+authorization code. After signing in, the browser is redirected to a
+`localhost` page that fails to load; copy that page's full URL from the address
+bar and paste it into the chat. The bot confirms the login. Until the login
+finishes, your messages go to the login instead of the agent; `!stop` cancels
+it.
+
+Alternatively, the NixOS module installs an `opencrow-pi` wrapper on the host
+that runs omp inside the container with the correct environment:
 
 ```bash
 sudo opencrow-pi
@@ -162,10 +170,8 @@ sudo opencrow-pi
 /login anthropic
 ```
 
-omp prints a URL — open it in any browser, complete the Anthropic login, and
-paste the redirect URL back with `/login <redirect-url>`. No local browser is
-required on the server itself. Credentials persist in `agent.db` across restarts
-— you only need to do this once (unless they get revoked).
+Either way, credentials persist in `agent.db` across restarts — you only need
+to do this once (unless they get revoked).
 
 ### Environment files
 

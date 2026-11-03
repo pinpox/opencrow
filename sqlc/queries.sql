@@ -42,7 +42,7 @@ LIMIT 1;
 DELETE FROM inbox WHERE id = ?;
 
 -- name: DeleteStaleItems :exec
-DELETE FROM inbox WHERE source IN ('heartbeat', 'compact');
+DELETE FROM inbox WHERE source IN ('heartbeat', 'compact', 'login');
 
 -- name: DequeueUserItems :many
 DELETE FROM inbox

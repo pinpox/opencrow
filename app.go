@@ -63,7 +63,15 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	// Record the incoming message so future reply-to references can quote it.
 	a.outbox.Put(ctx, msg.ConversationID, msg.MessageID, msg.Text)
 
-	switch strings.TrimSpace(msg.Text) {
+	text := strings.TrimSpace(msg.Text)
+
+	if provider, ok := loginArgs(text); ok {
+		a.handleLogin(ctx, msg, provider)
+
+		return
+	}
+
+	switch text {
 	case "!help":
 		a.handleHelp(ctx, msg)
 	case "!restart":
@@ -75,8 +83,29 @@ func (a *App) HandleMessage(ctx context.Context, msg backend.Message) {
 	case "!skills":
 		a.handleSkills(ctx, msg)
 	default:
+		// While a !login waits for the pasted redirect URL, replies answer
+		// the login instead of reaching the agent.
+		if a.worker.AnswerLogin(text) {
+			return
+		}
+
 		a.handlePrompt(ctx, msg)
 	}
+}
+
+// loginArgs reports whether text is a !login command and returns its
+// provider argument ("" for the configured default).
+func loginArgs(text string) (string, bool) {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || fields[0] != "!login" {
+		return "", false
+	}
+
+	if len(fields) > 1 {
+		return fields[1], true
+	}
+
+	return "", true
 }
 
 func (a *App) handleHelp(ctx context.Context, msg backend.Message) {
@@ -85,7 +114,8 @@ func (a *App) handleHelp(ctx context.Context, msg backend.Message) {
 		"  !restart — Kill the current session and start fresh\n" +
 		"  !stop    — Abort the currently running agent turn\n" +
 		"  !compact — Compact conversation context to reduce token usage\n" +
-		"  !skills  — List loaded skills"
+		"  !skills  — List loaded skills\n" +
+		"  !login [provider] — Sign in to the model provider (OAuth)"
 	a.backend.SendMessage(ctx, msg.ConversationID, help, "")
 }
 
@@ -130,6 +160,17 @@ func (a *App) handleCompact(ctx context.Context, msg backend.Message) {
 
 func (a *App) handleSkills(ctx context.Context, msg backend.Message) {
 	a.backend.SendMessage(ctx, msg.ConversationID, a.worker.SkillsSummary(), "")
+}
+
+func (a *App) handleLogin(ctx context.Context, msg backend.Message, provider string) {
+	provider, err := a.worker.StartLogin(ctx, provider, msg.ConversationID)
+	if err != nil {
+		a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Login failed: %v", err), "")
+
+		return
+	}
+
+	a.backend.SendMessage(ctx, msg.ConversationID, fmt.Sprintf("Starting %s login…", provider), "")
 }
 
 func (a *App) handlePrompt(ctx context.Context, msg backend.Message) {

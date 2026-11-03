@@ -23,6 +23,7 @@ const (
 	sourceTrigger   = "trigger"
 	sourceHeartbeat = "heartbeat"
 	sourceCompact   = "compact"
+	sourceLogin     = "login"
 )
 
 // Worker owns the single pi process and drains the inbox in priority order.
@@ -39,7 +40,7 @@ type Worker struct {
 	hbPrompt      string
 	triggerPrompt string
 
-	// mu protects pi, lastUse, compactResult, currentPriority, currentCancel, freshStart.
+	// mu protects pi, lastUse, compactResult, login, currentPriority, currentCancel, freshStart.
 	mu              sync.Mutex
 	pi              *PiProcess
 	freshStart      bool // next ensurePi spawns without --continue
@@ -47,6 +48,7 @@ type Worker struct {
 	currentPriority int64
 	currentCancel   context.CancelFunc
 	compactResult   chan compactOutcome
+	login           *loginSession
 
 	// wake is signalled (non-blocking) on every Notify call so the
 	// worker can poll the DB for the highest-priority item.
@@ -58,6 +60,19 @@ type compactOutcome struct {
 	result *CompactResult
 	err    error
 }
+
+// loginSession is a pending !login. The worker runs it as an inbox item;
+// until it finishes, the user's messages are routed to answers instead of
+// the agent.
+type loginSession struct {
+	provider       string
+	conversationID string
+	answers        chan string
+}
+
+// loginAnswerBuffer bounds replies queued while the login is busy
+// (e.g. delivering a previous paste); further replies are dropped.
+const loginAnswerBuffer = 4
 
 // Backend is the subset of backend.Backend the worker needs.
 type Backend interface {
@@ -196,6 +211,59 @@ func (w *Worker) Compact(ctx context.Context) (*CompactResult, error) {
 	}
 }
 
+// StartLogin queues an OAuth login for provider (the configured provider
+// when empty) and returns the resolved provider. The worker posts the
+// authorization URL and progress to conversationID.
+func (w *Worker) StartLogin(ctx context.Context, provider, conversationID string) (string, error) {
+	if provider == "" {
+		provider = w.piCfg.Provider
+	}
+
+	w.mu.Lock()
+	if w.login != nil {
+		w.mu.Unlock()
+
+		return "", errors.New("a login is already in progress")
+	}
+
+	w.login = &loginSession{
+		provider:       provider,
+		conversationID: conversationID,
+		answers:        make(chan string, loginAnswerBuffer),
+	}
+	w.mu.Unlock()
+
+	if err := w.inbox.Enqueue(ctx, PriorityUser, sourceLogin, "", ""); err != nil {
+		w.clearLogin()
+
+		return "", fmt.Errorf("enqueuing login: %w", err)
+	}
+
+	w.Notify(PriorityUser)
+
+	return provider, nil
+}
+
+// AnswerLogin hands a user reply to the pending login. Returns false when
+// no login is pending, so the caller treats the text as a normal message.
+func (w *Worker) AnswerLogin(text string) bool {
+	w.mu.Lock()
+	session := w.login
+	w.mu.Unlock()
+
+	if session == nil {
+		return false
+	}
+
+	select {
+	case session.answers <- text:
+	default:
+		slog.Warn("worker: login answer dropped, buffer full")
+	}
+
+	return true
+}
+
 // SetRoomID sets the room ID for this worker.
 func (w *Worker) SetRoomID(roomID string) {
 	w.roomID.Store(roomID)
@@ -245,6 +313,12 @@ func (w *Worker) StartIdleReaper(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (w *Worker) clearLogin() {
+	w.mu.Lock()
+	w.login = nil
+	w.mu.Unlock()
 }
 
 func (w *Worker) drainOnce(ctx context.Context) {
@@ -328,8 +402,13 @@ func (w *Worker) processItem(ctx context.Context, item Inbox) bool {
 		w.mu.Unlock()
 	}()
 
-	if item.Source == sourceCompact {
+	switch item.Source {
+	case sourceCompact:
 		w.processCompact(itemCtx)
+
+		return false
+	case sourceLogin:
+		w.processLogin(itemCtx)
 
 		return false
 	}
@@ -489,6 +568,51 @@ func (w *Worker) processCompact(ctx context.Context) {
 
 	result, err := pi.Compact(ctx)
 	ch <- compactOutcome{result: result, err: err}
+}
+
+func (w *Worker) processLogin(ctx context.Context) {
+	w.mu.Lock()
+	session := w.login
+	w.mu.Unlock()
+
+	if session == nil {
+		slog.Warn("worker: login item but no pending login")
+
+		return
+	}
+
+	defer w.clearLogin()
+
+	say := func(text string) { //nolint:contextcheck // final messages must go out even after !stop cancelled ctx
+		w.be.SendMessage(context.Background(), session.conversationID, text, "")
+	}
+
+	pi, err := w.ensurePi(ctx)
+	if err != nil {
+		say(fmt.Sprintf("Login failed: %v", err))
+
+		return
+	}
+
+	err = pi.Login(ctx, session.provider, say, session.answers)
+
+	// pi re-reads its credentials on start; restart it (resuming the
+	// session) so the next prompt uses the new login. After any failure
+	// other than pi's own rejection, pi may still be waiting on the OAuth
+	// callback and would hold every later command behind it.
+	if !errors.Is(err, errLoginRejected) {
+		w.stopPi()
+	}
+
+	switch {
+	case err == nil:
+		say(fmt.Sprintf("Logged in to %s.", session.provider))
+	case ctx.Err() != nil:
+		say("Login cancelled.")
+	default:
+		slog.Error("worker: login failed", "provider", session.provider, "error", err)
+		say(fmt.Sprintf("Login failed: %v", err))
+	}
 }
 
 func wasPreempted(ctx context.Context, err error) bool {
