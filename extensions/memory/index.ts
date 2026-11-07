@@ -228,26 +228,27 @@ function renderFact(f: Fact): string {
 
 // ── sediment process wrapper ─────────────────────────────────────────
 
-let sedimentAvailable: boolean | undefined;
-
 async function sediment(
   pi: ExtensionAPI,
   args: string[],
   opts: { signal?: AbortSignal; timeout?: number } = {},
 ): Promise<string> {
-  if (sedimentAvailable === false) throw new Error("sediment unavailable");
-
+  // Failures are per-call: a timeout (e.g. slow embedding-model load) or
+  // a user abort must not disable memory for the rest of the process.
   const result = await pi.exec(SEDIMENT_BIN, args, {
     signal: opts.signal,
     timeout: opts.timeout ?? SEDIMENT_TIMEOUT,
   });
 
+  if (result.killed) {
+    throw new Error(`sediment ${args[0]} timed out or was aborted`);
+  }
   if (result.code !== 0) {
-    if (result.killed || result.code === 127) sedimentAvailable = false;
-    throw new Error(`sediment ${args[0]} failed: ${result.stderr}`);
+    throw new Error(
+      `sediment ${args[0]} failed (exit ${result.code}): ${result.stderr}`,
+    );
   }
 
-  sedimentAvailable = true;
   return result.stdout;
 }
 
@@ -467,8 +468,9 @@ export default function (pi: ExtensionAPI) {
           block +
           "\n</recalled_memories>",
       };
-    } catch {
-      // sediment unavailable — proceed without memories.
+    } catch (e) {
+      // Proceed without memories; the next prompt retries.
+      console.error("memory: recall failed", e);
     }
   });
 
