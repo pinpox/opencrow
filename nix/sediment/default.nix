@@ -2,7 +2,13 @@
   lib,
   rustPlatform,
   fetchFromGitHub,
+  aws-lc,
+  oniguruma,
+  openssl,
+  pkg-config,
   protobuf,
+  sqlite,
+  zstd,
 }:
 
 rustPlatform.buildRustPackage rec {
@@ -18,7 +24,20 @@ rustPlatform.buildRustPackage rec {
 
   cargoHash = "sha256-NfXChnMYyNyyT3ocdT65Ic6Iu3Zp0LtuTR/Je8FzqZc=";
 
-  nativeBuildInputs = [ protobuf ];
+  nativeBuildInputs = [
+    pkg-config
+    protobuf
+  ];
+
+  # nixpkgs' cargo setup hook makes the -sys crates link system libraries
+  # instead of building their bundled copies.
+  buildInputs = [
+    aws-lc
+    oniguruma
+    openssl
+    sqlite
+    zstd
+  ];
 
   env = {
     PROTOC = "${protobuf}/bin/protoc";
