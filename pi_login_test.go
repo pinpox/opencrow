@@ -92,3 +92,43 @@ func TestWorker_LoginOverChat(t *testing.T) {
 		})
 	}
 }
+
+// TestWorker_MissingCredentialsSuggestLogin checks that pi's "No API key"
+// rejection reaches the chat as a !login hint, naming the provider only
+// when it differs from the configured default.
+func TestWorker_MissingCredentialsSuggestLogin(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		provider string
+		want     string
+	}{
+		{"default provider", "openai", "Not signed in to openai. Send !login to sign in"},
+		{"other provider", "anthropic", "Not signed in to openai. Send !login openai to sign in"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := newFakePiWorker(t)
+			mb := &mockBackend{}
+			w.SetBackend(mb)
+			w.piCfg.Provider = tc.provider
+
+			w.processPrompt(t.Context(), Inbox{Source: sourceUser, Content: "no-api-key"})
+
+			waitForMessage(t, mb, tc.want)
+
+			mb.mu.Lock()
+			defer mb.mu.Unlock()
+
+			for _, m := range mb.sentMessages {
+				if strings.Contains(m.text, "/login") {
+					t.Errorf("pi's TUI advice leaked into the chat: %q", m.text)
+				}
+			}
+		})
+	}
+}

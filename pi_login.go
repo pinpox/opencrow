@@ -5,12 +5,34 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 )
 
 // errLoginRejected marks a login that pi itself finished with a failure
 // response; pi is idle again afterwards. Any other Login error leaves pi
 // possibly still waiting on the OAuth flow.
 var errLoginRejected = errors.New("login rejected")
+
+// noAPIKeyRe matches pi's missing-credentials rejection, e.g.
+// "No API key found for anthropic.\n\nUse /login, set an API key …". The
+// advice in it targets pi's TUI, not chat users.
+var noAPIKeyRe = regexp.MustCompile(`No API key found for ([\w-]+)`)
+
+// chatError formats a pi failure for the chat. Missing credentials point
+// the user at !login instead of pi's TUI-only instructions.
+func (w *Worker) chatError(err error) string {
+	m := noAPIKeyRe.FindStringSubmatch(err.Error())
+	if m == nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	provider, cmd := m[1], "!login"
+	if provider != w.piCfg.Provider {
+		cmd += " " + provider
+	}
+
+	return fmt.Sprintf("Not signed in to %s. Send %s to sign in, or configure an API key for it.", provider, cmd)
+}
 
 // Login runs pi's OAuth login for provider over RPC. say posts a message to
 // the user; answers carries the user's replies.

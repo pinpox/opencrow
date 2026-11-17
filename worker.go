@@ -525,7 +525,7 @@ func (w *Worker) handlePiError(ctx context.Context, item Inbox, convID, label st
 	}
 
 	if item.Source == sourceUser {
-		w.be.SendMessage(ctx, convID, fmt.Sprintf("Error: %v", err), "")
+		w.be.SendMessage(ctx, convID, w.chatError(err), "")
 	}
 
 	return false

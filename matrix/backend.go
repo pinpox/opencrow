@@ -54,6 +54,9 @@ type Backend struct {
 	userID        id.UserID
 	allowedUsers  map[string]struct{}
 	initialSynced atomic.Bool
+	// verifyHintPending is set when startup cross-signing failed and the
+	// user has not been told about !verify yet.
+	verifyHintPending atomic.Bool
 
 	roomMu     sync.Mutex
 	activeRoom string
@@ -426,7 +429,8 @@ func (b *Backend) setupCrypto(ctx context.Context) error {
 	slog.Info("e2ee initialized", "device_id", b.client.DeviceID)
 
 	if err := b.ensureCrossSigning(ctx); err != nil {
-		slog.Warn("cross-signing setup failed", "error", err)
+		slog.Warn("cross-signing setup failed, send !verify to retry", "error", err)
+		b.verifyHintPending.Store(true)
 	}
 
 	return nil
@@ -617,6 +621,11 @@ func (b *Backend) handleMessage(ctx context.Context, evt *event.Event) {
 		return
 	}
 
+	if b.verifyHintPending.Swap(false) {
+		b.SendMessage(ctx, roomID, "My device isn't cross-signed, so clients may show my messages as unverified. "+
+			"Send `!verify` to set up cross-signing.", "")
+	}
+
 	if msg.MsgType != event.MsgText {
 		text = b.handleAttachment(ctx, msg, roomID)
 		if text == "" {
@@ -698,6 +707,8 @@ func (b *Backend) handleAttachment(ctx context.Context, msg *event.MessageEventC
 }
 
 func (b *Backend) handleVerify(ctx context.Context, roomID id.RoomID) {
+	b.verifyHintPending.Store(false)
+
 	if err := b.ensureCrossSigning(ctx); err != nil {
 		b.SendMessage(ctx, string(roomID), fmt.Sprintf(
 			"Cross-signing failed: %v\n\n"+

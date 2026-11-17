@@ -22,7 +22,7 @@ Send these as plain text messages in any conversation with the bot:
 | `!compact` | Compact conversation context to reduce token usage |
 | `!skills` | List the skills loaded for this bot instance |
 | `!login [provider]` | Sign in to the model provider via OAuth from the chat (defaults to `OPENCROW_PI_PROVIDER`) |
-| `!verify` | (Matrix only) Set up cross-signing so the bot's device shows as verified |
+| `!verify` | (Matrix only) Set up cross-signing so the bot's device shows as verified. If cross-signing fails at startup, the bot suggests this on the next message |
 
 ## General configuration
 

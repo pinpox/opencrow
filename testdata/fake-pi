@@ -14,6 +14,10 @@ while IFS= read -r line; do
           sleep 300 &
           printf '%s' "$!" > "$OPENCROW_SESSION_DIR/child.pid"
           ;;
+        *no-api-key*)
+          printf '%s\n' '{"type":"response","command":"prompt","success":false,"error":"No API key found for openai.\n\nUse /login, set an API key environment variable, or create /tmp/agent.db"}'
+          continue
+          ;;
       esac
       printf '%s\n' '{"type":"response","command":"prompt","success":true}'
       printf '%s\n' '{"type":"agent_start"}'
